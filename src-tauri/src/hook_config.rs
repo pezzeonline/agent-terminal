@@ -154,21 +154,45 @@ pub(crate) async fn write_hook_script_to(
 /// Generates the hook shell script content for `agent_id`.
 ///
 /// The script reads the agent's JSON payload from stdin, prepends `agent` and
-/// `event` fields, and POSTs to the hook server. Always exits 0 so the agent
-/// is never blocked by a hook failure.
+/// `event` fields, and fires a curl POST to the hook server in a detached
+/// background subshell. The script exits in milliseconds regardless of what
+/// curl does — Claude Code (and any other agent) is never blocked waiting on
+/// the hook server.
+///
+/// Why detach instead of `--connect-timeout`/`--max-time`: ECONNREFUSED is
+/// instant on macOS, so a missing server doesn't hang. The hang we hit in
+/// 2026-04-26 was from a zombie process holding port 47384 in LISTEN state
+/// without responding — curl established the TCP connection then waited ~60s
+/// for a response that never came. A timeout would bound the hang per call,
+/// but every hook would still pay that cost. Fire-and-forget eliminates the
+/// problem structurally: the script's only job is one-way notification, so
+/// it has no business waiting for the HTTP response. `--max-time 5` stays as
+/// a ceiling on background curl lifetime so they don't accumulate as zombies
+/// if the server is hung and hooks fire repeatedly.
 fn build_hook_script(agent_id: &str) -> String {
     // The sed command removes the leading `{` from the agent's JSON payload so
     // we can inject our own fields at the front. The result is a valid JSON object:
     //   {"agent":"claude-code","event":"UserPromptSubmit","session_id":"...","cwd":"..."}
+    //
+    // CRITICAL: the inner echo uses bare "$INPUT" (shell-quoted), NOT \"$INPUT\".
+    // The backslash-quote form prints LITERAL quote characters around the value,
+    // so sed never sees the leading `{` and the merged payload is malformed JSON.
+    // That bug shipped originally and silently broke every hook delivery —
+    // serde rejected the bad JSON, ps-fallback kept the UI working, nobody
+    // noticed until the integration tests caught it.
     format!(
         "#!/bin/sh\n\
 # Written by Agent Terminal. Do not edit — regenerated on each launch.\n\
+# Fire-and-forget: script returns immediately so Claude/Codex never block on hook delivery.\n\
 INPUT=$(cat)\n\
 EVENT=\"$1\"\n\
-curl -sf -X POST http://localhost:47384/hook \\\n\
-  -H 'Content-Type: application/json' \\\n\
-  -d \"{{\\\"agent\\\":\\\"{agent_id}\\\",\\\"event\\\":\\\"$EVENT\\\",$(echo \\\"$INPUT\\\" | sed 's/^{{//')}}\" \\\n\
-  >/dev/null 2>&1 || true\n",
+STRIPPED=$(printf '%s' \"$INPUT\" | sed 's/^{{//')\n\
+PAYLOAD=\"{{\\\"agent\\\":\\\"{agent_id}\\\",\\\"event\\\":\\\"$EVENT\\\",$STRIPPED\"\n\
+{{ curl -sf --max-time 5 -X POST http://localhost:47384/hook \\\n\
+    -H 'Content-Type: application/json' \\\n\
+    -d \"$PAYLOAD\" \\\n\
+    >/dev/null 2>&1 & }} 2>/dev/null\n\
+exit 0\n",
     )
 }
 
