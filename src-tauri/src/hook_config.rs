@@ -233,20 +233,14 @@ pub(crate) async fn merge_hook_config_at(
                 .as_array_mut()
                 .ok_or_else(|| format!("\"hooks.{}\" is not a JSON array", event.event_name))?;
 
-            // Migration: remove stale flat-format entries (old Claude format was
-            // {type, command} at the top level; Claude now requires the matcher+hooks
-            // nesting). These cause Claude Code to report a "settings file damaged" error.
-            let before = arr.len();
-            arr.retain(|entry| {
-                entry.get("command").and_then(|v| v.as_str()) != Some(our_command.as_str())
-            });
-            if arr.len() < before {
-                modified = true;
-            }
-
-            // Idempotency check — skip if our command is already present in the
-            // current (nested matcher+hooks) format (C5, C10, D3, D4).
-            let already_installed = command_in_nested_entry(arr, &our_command);
+            // Idempotency check — skip if our command is already present (C5, C10, D3, D4).
+            // Check is format-aware: Claude uses nested `hooks[]` arrays; Codex uses flat entries.
+            let already_installed = match config.config_format {
+                HookConfigFormat::Claude => command_in_nested_entry(arr, &our_command),
+                HookConfigFormat::Codex => arr.iter().any(|entry| {
+                    entry.get("command").and_then(|v| v.as_str()) == Some(our_command.as_str())
+                }),
+            };
 
             if !already_installed {
                 arr.push(build_hook_entry(config, &our_command));
@@ -629,41 +623,6 @@ mod tests {
                 .count();
             assert_eq!(count, 1, "event {} should have exactly one entry", event.event_name);
         }
-    }
-
-    // ── C11: stale flat-format entries are replaced with new nested format ────
-    #[tokio::test]
-    async fn c11_claude_migrates_old_flat_format() {
-        let dir = temp_dir("c11");
-        let config_path = dir.join("settings.json");
-        let script = dir.join("claude-hook");
-        let our_cmd = format!("{} UserPromptSubmit", script.display());
-
-        // Write the old (now-invalid) flat format that we used to produce.
-        fs::write(
-            &config_path,
-            format!(
-                r#"{{"hooks":{{"UserPromptSubmit":[{{"type":"command","command":"{our_cmd}","timeout":10000}}]}}}}"#
-            ),
-        )
-        .unwrap();
-
-        merge_hook_config_at(claude_config(), &config_path, &script)
-            .await
-            .unwrap();
-
-        let v = read_json(&config_path);
-        let arr = v["hooks"]["UserPromptSubmit"].as_array().unwrap();
-
-        // Old flat entry must be gone.
-        let flat_still_there = arr.iter().any(|e| e["command"].as_str() == Some(&our_cmd));
-        assert!(!flat_still_there, "stale flat entry should be removed");
-
-        // New nested entry must be present.
-        assert!(has_our_command(&v, "UserPromptSubmit", &script));
-
-        // Only one entry for UserPromptSubmit (no duplicate).
-        assert_eq!(arr.len(), 1, "should be exactly one entry after migration");
     }
 
     // ── D1: Codex fresh install ───────────────────────────────────────────────
