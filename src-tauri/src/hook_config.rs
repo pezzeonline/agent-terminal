@@ -17,14 +17,15 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 
 // ─── Static registry ─────────────────────────────────────────────────────────
-
-/// Distinguishes how hook entries are serialised into the agent's config file.
-pub enum HookConfigFormat {
-    /// `{"type":"command","command":"...","timeout":N}` — used by Claude Code.
-    Claude,
-    /// `{"command":"..."}` — used by Codex CLI.
-    Codex,
-}
+//
+// All supported agents (Claude Code, Codex) speak the same hook protocol:
+// nested matcher+hooks JSON entries with `{type:"command", command:"…", timeout:N}`.
+// Codex's `hook_runtime.rs` module is literally called `ClaudeHooksEngine` and
+// reads the same shape from `~/.codex/hooks.json` that Claude reads from
+// `~/.claude/settings.json`. There used to be a `HookConfigFormat::Codex` flat
+// variant — that was wrong and silently broke codex hook delivery from day one.
+// The 2026-04-27 e2e tests caught it: Codex never fired for our config until we
+// rewrote `hooks.json` in the nested format.
 
 pub struct AgentHookEvent {
     /// Name used as the key in the agent's config (e.g. `"UserPromptSubmit"`).
@@ -40,8 +41,7 @@ pub struct AgentHookConfig {
     pub agent_id: &'static str,
     /// Tilde path to the agent's hook config file.
     pub config_tilde_path: &'static str,
-    pub config_format: HookConfigFormat,
-    /// Timeout (ms) written into Claude-format entries.
+    /// Timeout (ms) written into each hook entry.
     pub timeout_ms: u64,
     pub events: &'static [AgentHookEvent],
 }
@@ -52,7 +52,6 @@ pub static AGENT_HOOK_CONFIGS: &[AgentHookConfig] = &[
         hook_stem: "claude",
         agent_id: "claude-code",
         config_tilde_path: "~/.claude/settings.json",
-        config_format: HookConfigFormat::Claude,
         timeout_ms: 10_000,
         events: &[
             AgentHookEvent { event_name: "SessionStart" },
@@ -68,7 +67,6 @@ pub static AGENT_HOOK_CONFIGS: &[AgentHookConfig] = &[
         hook_stem: "codex",
         agent_id: "codex",
         config_tilde_path: "~/.codex/hooks.json",
-        config_format: HookConfigFormat::Codex,
         timeout_ms: 5_000,
         events: &[
             AgentHookEvent { event_name: "SessionStart" },
@@ -257,14 +255,10 @@ pub(crate) async fn merge_hook_config_at(
                 .as_array_mut()
                 .ok_or_else(|| format!("\"hooks.{}\" is not a JSON array", event.event_name))?;
 
-            // Idempotency check — skip if our command is already present (C5, C10, D3, D4).
-            // Check is format-aware: Claude uses nested `hooks[]` arrays; Codex uses flat entries.
-            let already_installed = match config.config_format {
-                HookConfigFormat::Claude => command_in_nested_entry(arr, &our_command),
-                HookConfigFormat::Codex => arr.iter().any(|entry| {
-                    entry.get("command").and_then(|v| v.as_str()) == Some(our_command.as_str())
-                }),
-            };
+            // Idempotency check — skip if our command is already present in the
+            // nested hooks[] array (C5, C10, D3, D4). Same check for both
+            // Claude and Codex since they share the schema.
+            let already_installed = command_in_nested_entry(arr, &our_command);
 
             if !already_installed {
                 arr.push(build_hook_entry(config, &our_command));
@@ -291,25 +285,23 @@ pub(crate) async fn merge_hook_config_at(
     Ok(())
 }
 
+/// Builds a single hook entry in the nested matcher+hooks JSON format.
+///
+/// Both Claude Code and Codex CLI use this exact schema. Codex implements
+/// Claude's hook protocol verbatim (see codex-rs/hooks/ — the engine is named
+/// `ClaudeHooksEngine`). Empty matcher string means "match all" (fires for
+/// every tool/event).
 fn build_hook_entry(config: &AgentHookConfig, command: &str) -> Value {
-    match config.config_format {
-        // Claude Code format (as of Claude Code ≥1.x):
-        // each array entry is a matcher object wrapping an inner hooks array.
-        // Empty matcher string means "match all" (fires for every tool/event).
-        HookConfigFormat::Claude => serde_json::json!({
-            "matcher": "",
-            "hooks": [
-                {
-                    "type": "command",
-                    "command": command,
-                    "timeout": config.timeout_ms,
-                }
-            ]
-        }),
-        HookConfigFormat::Codex => serde_json::json!({
-            "command": command,
-        }),
-    }
+    serde_json::json!({
+        "matcher": "",
+        "hooks": [
+            {
+                "type": "command",
+                "command": command,
+                "timeout": config.timeout_ms,
+            }
+        ]
+    })
 }
 
 /// Returns true if `our_command` is found inside any entry's nested `hooks` array.
@@ -649,7 +641,7 @@ mod tests {
         }
     }
 
-    // ── D1: Codex fresh install ───────────────────────────────────────────────
+    // ── D1: Codex fresh install — nested matcher+hooks format ────────────────
     #[tokio::test]
     async fn d1_codex_fresh_install() {
         let dir = temp_dir("d1");
@@ -663,34 +655,28 @@ mod tests {
         let v = read_json(&config_path);
         assert!(v["hooks"].is_object());
         for event in codex_config().events {
-            let arr = v["hooks"][event.event_name].as_array().unwrap();
-            let our_cmd = format!("{} {}", script.display(), event.event_name);
+            // Same nested format as Claude: each entry has a "hooks" array
+            // containing {type:"command", command:"…"} objects. Codex's hook
+            // engine is literally Claude's — see codex-rs/hooks/.
             assert!(
-                arr.iter().any(|e| e["command"].as_str() == Some(our_cmd.as_str())),
-                "missing {}", event.event_name
-            );
-            // Codex format: no "type" field.
-            let our_entry = arr
-                .iter()
-                .find(|e| e["command"].as_str() == Some(our_cmd.as_str()))
-                .unwrap();
-            assert!(
-                our_entry.get("type").is_none(),
-                "Codex entries must not have a type field"
+                has_our_command(&v, event.event_name, &script),
+                "missing {} in nested matcher+hooks format", event.event_name
             );
         }
     }
 
-    // ── D2: Codex file exists, entries absent → appended ─────────────────────
+    // ── D2: Codex file exists, entries absent → appended (nested format) ─────
     #[tokio::test]
     async fn d2_codex_append_to_existing() {
         let dir = temp_dir("d2");
         let config_path = dir.join("hooks.json");
         let script = dir.join("codex-hook");
 
+        // Pre-existing entry uses the same nested format too — that's the
+        // canonical schema for codex hooks.
         fs::write(
             &config_path,
-            r#"{"hooks":{"SessionStart":[{"command":"my-existing-hook start"}]}}"#,
+            r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"my-existing-hook start"}]}]}}"#,
         )
         .unwrap();
 
@@ -699,11 +685,20 @@ mod tests {
             .unwrap();
 
         let v = read_json(&config_path);
-        // Existing entry preserved.
         let arr = v["hooks"]["SessionStart"].as_array().unwrap();
-        assert!(arr
-            .iter()
-            .any(|e| e["command"].as_str() == Some("my-existing-hook start")));
+        // Existing entry preserved.
+        let existing_present = arr.iter().any(|entry| {
+            entry
+                .get("hooks")
+                .and_then(|h| h.as_array())
+                .map(|inner| {
+                    inner.iter().any(|h| {
+                        h.get("command").and_then(|c| c.as_str()) == Some("my-existing-hook start")
+                    })
+                })
+                .unwrap_or(false)
+        });
+        assert!(existing_present, "existing nested hook entry should be preserved");
         // Ours also present.
         assert!(has_our_command(&v, "SessionStart", &script));
     }
@@ -746,10 +741,25 @@ mod tests {
         for event in codex_config().events {
             let arr = v["hooks"][event.event_name].as_array().unwrap();
             let our_cmd = format!("{} {}", script.display(), event.event_name);
-            let count = arr
+            // Count occurrences inside nested hooks[] arrays (same format as Claude).
+            let count: usize = arr
                 .iter()
-                .filter(|e| e["command"].as_str() == Some(our_cmd.as_str()))
-                .count();
+                .map(|entry| {
+                    entry
+                        .get("hooks")
+                        .and_then(|h| h.as_array())
+                        .map(|inner| {
+                            inner
+                                .iter()
+                                .filter(|h| {
+                                    h.get("command").and_then(|c| c.as_str())
+                                        == Some(our_cmd.as_str())
+                                })
+                                .count()
+                        })
+                        .unwrap_or(0)
+                })
+                .sum();
             assert_eq!(count, 1, "event {} should have exactly one entry", event.event_name);
         }
     }

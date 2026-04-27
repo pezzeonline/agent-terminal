@@ -462,3 +462,278 @@ async fn i6_real_codex_hooks_no_duplicates() {
         );
     }
 }
+
+// ─── E2E (guided / interactive) helpers ──────────────────────────────────────
+//
+// IMPORTANT: E1/E2 below are NOT fully automated. They are guided tests that
+// require a human user (with a coding agent helping them) to manually run
+// claude/codex commands in a separate terminal.
+//
+// Why guided instead of automated subprocess spawning:
+//   1. AI CLIs prompt interactively for trust dialogs, auth, etc. — automating
+//      around all of that is brittle and per-version.
+//   2. While the test collector is bound to 47384, EVERY claude/codex process
+//      on the machine fires hooks at it (incl. the user's other terminals).
+//      Filtering by cwd helps but the cleanest signal is a human pointing the
+//      CLI at a known-empty directory created by the test.
+//   3. Real E2E means a real human sat down and verified the full path. An
+//      automated subprocess proves only that we can spawn a process; a guided
+//      test proves the actual user-facing behavior.
+//
+// HOW TO RUN: with `cargo test ... --include-ignored --test-threads=1
+// --nocapture`. The test prints exact instructions (cwd + command) on stderr.
+// A coding agent watching the test output should:
+//   - Read the printed cwd and command verbatim
+//   - Tell the user which terminal to open and what to type
+//   - Wait for the user to confirm the command was run
+//   - Let the test continue (it polls for the hook events automatically)
+//
+// SKIPPED when:
+//   - CI=true (CI/CD environments — these tests need a human)
+//   - port 47384 busy (agent-terminal running, or stale binding)
+
+fn ci_environment() -> bool {
+    std::env::var("CI").map(|v| v == "true").unwrap_or(false)
+}
+
+/// How long the guided E2E tests wait for hook events to arrive after printing
+/// instructions. Generous because the user needs time to switch terminals,
+/// paste the command, deal with any auth prompts, and let the LLM respond.
+const E2E_GUIDED_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Polls the received queue and returns ALL payloads from `cwd` once at least
+/// one `SessionStart` from `expected_agent` has arrived. Adds a 2-second tail
+/// after that to capture the rest of the hook sequence (UserPromptSubmit, Stop,
+/// SessionEnd, etc).
+///
+/// Returns an empty Vec on timeout — caller asserts non-empty.
+async fn wait_for_session_in_cwd(
+    received: &Received,
+    cwd: &str,
+    expected_agent: &str,
+    timeout_dur: Duration,
+) -> Vec<Value> {
+    let cwd_prefix = format!("{cwd}/");
+    let start = Instant::now();
+    let mut ours: Vec<Value> = Vec::new();
+    let mut session_start_seen_at: Option<Instant> = None;
+
+    while start.elapsed() < timeout_dur {
+        // Drain whatever is in the shared queue; keep only payloads that match
+        // our cwd and expected agent. Other sessions' hooks (your real Claude
+        // in another terminal) are ambient noise and dropped here.
+        {
+            let mut queue = received.lock().unwrap();
+            while let Some(p) = queue.pop_front() {
+                let matches_cwd = p["cwd"]
+                    .as_str()
+                    .map(|c| c == cwd || c.starts_with(&cwd_prefix))
+                    .unwrap_or(false);
+                let matches_agent = p["agent"] == expected_agent;
+                if matches_cwd && matches_agent {
+                    if p["event"] == "SessionStart" && session_start_seen_at.is_none() {
+                        session_start_seen_at = Some(Instant::now());
+                    }
+                    ours.push(p);
+                }
+            }
+        }
+
+        // Once we see SessionStart, wait an extra 2s for the rest of the
+        // session's events (UserPromptSubmit, Stop) to arrive, then return.
+        if let Some(t) = session_start_seen_at {
+            if t.elapsed() >= Duration::from_secs(2) {
+                return ours;
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    ours
+}
+
+/// Loud, multi-line instruction banner printed to stderr so a coding agent
+/// watching `cargo test --nocapture` output can immediately recognize the
+/// guidance and relay it to the user.
+///
+/// Tests use real INTERACTIVE sessions, not non-interactive `-p` / `exec` modes,
+/// because that's what end users actually use. Hook firing should be verified
+/// against the realistic path. The user opens a session, types a prompt, hits
+/// enter, and the test sees the events.
+fn print_e2e_instructions(
+    test_name: &str,
+    cwd: &str,
+    launch_command: &str,
+    prompt_to_send: &str,
+) {
+    eprintln!();
+    eprintln!("==============================================================");
+    eprintln!("  GUIDED E2E TEST — HUMAN ACTION REQUIRED");
+    eprintln!("  Test: {test_name}");
+    eprintln!("==============================================================");
+    eprintln!("  Step 1 — Open a NEW terminal window and run:");
+    eprintln!();
+    eprintln!("      cd {cwd}");
+    eprintln!("      {launch_command}");
+    eprintln!();
+    eprintln!("  Step 2 — Once the interactive session is ready, type this");
+    eprintln!("           prompt and press Enter to submit:");
+    eprintln!();
+    eprintln!("      {prompt_to_send}");
+    eprintln!();
+    eprintln!("  Step 3 — Wait for the agent to respond. The test will detect");
+    eprintln!("           hook events as they fire and move on automatically.");
+    eprintln!("           You can close the session anytime after that.");
+    eprintln!();
+    eprintln!("  Test will wait up to {} seconds for hook events.", E2E_GUIDED_TIMEOUT.as_secs());
+    eprintln!("==============================================================");
+    eprintln!();
+}
+
+// ─── E1: Real Claude Code fires hooks end-to-end (GUIDED) ────────────────────
+//
+// ⚠️ HUMAN-IN-THE-LOOP TEST. Read the long comment block above the helpers
+// before changing this. The test prepares an isolated cwd, prints exact
+// instructions on stderr, and then waits for hook events to arrive. A coding
+// agent watching `cargo test --nocapture` output should relay the printed
+// instructions to the user and wait for them to run the command.
+//
+// Pre-installs hooks via `ensure_hooks_installed()` so the user can run the
+// command immediately without first launching agent-terminal — even if
+// `~/.claude/settings.json` was previously reset.
+
+#[tokio::test]
+#[ignore]
+async fn e1_guided_claude_fires_hooks_end_to_end() {
+    if ci_environment() {
+        eprintln!("SKIP e1: CI=true — guided e2e tests need a human");
+        return;
+    }
+
+    let _g = acquire_port_lock();
+
+    // Idempotent: adds nothing if hooks are already present.
+    agent_terminal_lib::hook_config::ensure_hooks_installed().await;
+
+    let Some(listener) = try_bind_hook_port().await else {
+        eprintln!("SKIP e1: port 47384 busy (agent-terminal running?)");
+        return;
+    };
+    let server = start_collector(listener);
+
+    // Per-PID cwd so the user can re-run the test fresh and the test only sees
+    // hooks fired from THIS run, not stale events from a previous attempt.
+    // Canonicalize: macOS resolves /var/folders → /private/var/folders, and
+    // claude reports the canonical path in hook payloads. Without canonicalize,
+    // our cwd filter rejects every event from the user's manual session.
+    let test_cwd_raw = std::env::temp_dir().join(format!("agent-terminal-e1-{}", std::process::id()));
+    std::fs::create_dir_all(&test_cwd_raw).expect("could not create test cwd");
+    let test_cwd = std::fs::canonicalize(&test_cwd_raw).expect("could not canonicalize test cwd");
+    let test_cwd_str = test_cwd.to_string_lossy().to_string();
+
+    print_e2e_instructions(
+        "e1_guided_claude_fires_hooks_end_to_end",
+        &test_cwd_str,
+        "claude",
+        "Reply with the single word: pong",
+    );
+
+    let ours = wait_for_session_in_cwd(&server.received, &test_cwd_str, "claude-code", E2E_GUIDED_TIMEOUT)
+        .await;
+
+    eprintln!(
+        "e1: received {} matching hook payloads: {:?}",
+        ours.len(),
+        ours.iter()
+            .map(|p| format!("{}/{}", p["agent"].as_str().unwrap_or("?"), p["event"].as_str().unwrap_or("?")))
+            .collect::<Vec<_>>()
+    );
+
+    assert!(
+        !ours.is_empty(),
+        "no hook events arrived for cwd={test_cwd_str} within {}s. \
+         Did the user run `claude -p '...'` in that directory? \
+         If `which claude` is a cmux wrapper, ~/.claude/settings.json is bypassed.",
+        E2E_GUIDED_TIMEOUT.as_secs()
+    );
+
+    let saw_session_start = ours.iter().any(|p| p["event"] == "SessionStart");
+    assert!(
+        saw_session_start,
+        "claude-code events received from our cwd but no SessionStart: {ours:?}"
+    );
+
+    let saw_user_prompt = ours.iter().any(|p| p["event"] == "UserPromptSubmit");
+    assert!(
+        saw_user_prompt,
+        "SessionStart fired but no UserPromptSubmit — \
+         did the user actually submit a prompt? Events: {ours:?}"
+    );
+}
+
+// ─── E2: Real Codex fires hooks end-to-end (GUIDED) ──────────────────────────
+//
+// ⚠️ HUMAN-IN-THE-LOOP TEST. Same protocol as E1 but for codex.
+
+#[tokio::test]
+#[ignore]
+async fn e2_guided_codex_fires_hooks_end_to_end() {
+    if ci_environment() {
+        eprintln!("SKIP e2: CI=true — guided e2e tests need a human");
+        return;
+    }
+
+    let _g = acquire_port_lock();
+
+    agent_terminal_lib::hook_config::ensure_hooks_installed().await;
+
+    let Some(listener) = try_bind_hook_port().await else {
+        eprintln!("SKIP e2: port 47384 busy (agent-terminal running?)");
+        return;
+    };
+    let server = start_collector(listener);
+
+    let test_cwd_raw = std::env::temp_dir().join(format!("agent-terminal-e2-{}", std::process::id()));
+    std::fs::create_dir_all(&test_cwd_raw).expect("could not create test cwd");
+    let test_cwd = std::fs::canonicalize(&test_cwd_raw).expect("could not canonicalize test cwd");
+    let test_cwd_str = test_cwd.to_string_lossy().to_string();
+
+    // codex refuses to start outside a git repo, so init one in the temp dir.
+    // The user shouldn't need to think about this.
+    let _ = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&test_cwd)
+        .status();
+
+    print_e2e_instructions(
+        "e2_guided_codex_fires_hooks_end_to_end",
+        &test_cwd_str,
+        "codex",
+        "Reply with the single word: pong",
+    );
+
+    let ours = wait_for_session_in_cwd(&server.received, &test_cwd_str, "codex", E2E_GUIDED_TIMEOUT)
+        .await;
+
+    eprintln!(
+        "e2: received {} matching hook payloads: {:?}",
+        ours.len(),
+        ours.iter()
+            .map(|p| format!("{}/{}", p["agent"].as_str().unwrap_or("?"), p["event"].as_str().unwrap_or("?")))
+            .collect::<Vec<_>>()
+    );
+
+    assert!(
+        !ours.is_empty(),
+        "no hook events arrived for cwd={test_cwd_str} within {}s. \
+         Did the user run `codex exec ...` in that directory?",
+        E2E_GUIDED_TIMEOUT.as_secs()
+    );
+
+    let saw_session_start = ours.iter().any(|p| p["event"] == "SessionStart");
+    assert!(
+        saw_session_start,
+        "codex events received from our cwd but no SessionStart: {ours:?}"
+    );
+}
+

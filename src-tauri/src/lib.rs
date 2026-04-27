@@ -1,6 +1,9 @@
 mod commands;
-mod hook_config;
-mod hook_server;
+// `pub` so integration tests in `tests/` can call `ensure_hooks_installed()` and
+// build payloads against `HookPayload`. Internal API otherwise — the app uses these
+// modules directly.
+pub mod hook_config;
+pub mod hook_server;
 mod mod_engine;
 mod pty_manager;
 mod shell_integration;
