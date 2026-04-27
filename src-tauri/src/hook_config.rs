@@ -71,6 +71,11 @@ pub static AGENT_HOOK_CONFIGS: &[AgentHookConfig] = &[
         events: &[
             AgentHookEvent { event_name: "SessionStart" },
             AgentHookEvent { event_name: "UserPromptSubmit" },
+            // Codex's equivalent of Claude's `Notification` — fires when the
+            // agent is blocked waiting for user approval (e.g. a shell command
+            // that needs confirmation). Routed to the same `awaiting` state in
+            // AgentTurnMod so the UI shows the amber badge identically.
+            AgentHookEvent { event_name: "PermissionRequest" },
             AgentHookEvent { event_name: "Stop" },
         ],
     },

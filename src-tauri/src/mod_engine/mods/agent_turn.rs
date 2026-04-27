@@ -4,13 +4,18 @@
 //! State machine per session:
 //!
 //! ```text
-//! SessionStart   → Idle
+//! SessionStart                                 → Idle
 //! UserPromptSubmit / PreToolUse (non-question) → InProgress
 //! PreToolUse (tool_name == "AskUserQuestion")  → saves question, state unchanged
-//! Notification   → Awaiting { message }
-//! Stop           → Completed (async: reads transcript for last message)
-//! SessionEnd     → session removed, emit Idle to clear badge
+//! Notification (Claude) | PermissionRequest (Codex) → Awaiting { message }
+//! Stop                                         → Completed (async: reads transcript)
+//! SessionEnd                                   → session removed, emit Idle to clear badge
 //! ```
+//!
+//! Awaiting is dispatched from two different event names depending on the agent
+//! — Claude calls it `Notification`, Codex calls it `PermissionRequest`. They
+//! are functionally identical (agent is blocked, user attention required) and
+//! funnel into a single `handle_awaiting` so the UI sees one state.
 //!
 //! The mod emits `agent_state_changed` events to the frontend, which writes
 //! into `$tabMeta.agentState`. `deriveAgentState()` in `agent.helpers.ts`
@@ -139,7 +144,9 @@ impl Mod for AgentTurnMod {
                     self.handle_in_progress(payload);
                 }
             }
-            "Notification" => self.handle_awaiting(payload),
+            // Claude calls it Notification, Codex calls it PermissionRequest —
+            // same role, same handler.
+            "Notification" | "PermissionRequest" => self.handle_awaiting(payload),
             "Stop" => self.handle_completed(payload),
             "SessionEnd" => self.handle_session_end(payload),
             _ => {}
@@ -207,8 +214,11 @@ impl AgentTurnMod {
             state.pending_question.take()
         };
 
-        // Fall back to raw notification message, or a generic placeholder.
+        // Fall back through: saved question (Claude AskUserQuestion) →
+        // codex prompt (Codex PermissionRequest) → claude notification message →
+        // generic placeholder.
         let message = message
+            .or_else(|| payload.prompt.clone().filter(|m| !m.trim().is_empty()))
             .or_else(|| payload.message.clone().filter(|m| !m.trim().is_empty()))
             .or_else(|| Some("Needs your attention".to_string()));
 

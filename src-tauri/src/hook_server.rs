@@ -21,8 +21,9 @@ use tokio::sync::mpsc;
 pub struct HookPayload {
     /// Which agent sent the event: `"claude-code"` or `"codex"`.
     pub agent: String,
-    /// Lifecycle event name: `"SessionStart"`, `"UserPromptSubmit"`,
+    /// Lifecycle event name. Claude Code: `"SessionStart"`, `"UserPromptSubmit"`,
     /// `"PreToolUse"`, `"Notification"`, `"Stop"`, `"SessionEnd"`.
+    /// Codex: same first three, plus `"PermissionRequest"`, `"PostToolUse"`, `"Stop"`.
     pub event: String,
     pub session_id: Option<String>,
     pub cwd: Option<String>,
@@ -30,6 +31,10 @@ pub struct HookPayload {
     pub message: Option<String>,
     pub transcript_path: Option<String>,
     pub last_assistant_message: Option<String>,
+    /// Sent by Codex `PermissionRequest` events — the human-readable
+    /// description of what the agent wants to do (typically a shell command).
+    /// Used as the awaiting-badge tooltip.
+    pub prompt: Option<String>,
 }
 
 /// Starts the hook HTTP server in a background task.
