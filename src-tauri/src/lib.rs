@@ -5,6 +5,7 @@ mod commands;
 pub mod hook_config;
 pub mod hook_server;
 mod mod_engine;
+mod notifications;
 mod pty_manager;
 mod shell_integration;
 
@@ -35,6 +36,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             // Best-effort: write shell integration scripts. Never fail app startup.
             if let Err(e) = setup_shell_integration() {
@@ -71,6 +73,8 @@ pub fn run() {
             commands::close_tab,
             commands::list_projects,
             commands::save_projects,
+            notifications::show_agent_notification,
+            notifications::cancel_agent_notification,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
