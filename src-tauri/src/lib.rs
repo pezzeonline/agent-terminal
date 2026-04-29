@@ -23,8 +23,9 @@ use mod_engine::{
         ShellProcessMod,
     },
 };
+use notifications::NotificationService;
 use shell_integration::setup_shell_integration;
-use tauri::{Emitter, Manager, WindowEvent};
+use tauri::{Manager, WindowEvent};
 use pty_manager::PtyMap;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -47,6 +48,12 @@ pub fn run() {
             // Runs in the background — never blocks startup, never crashes the app.
             tauri::async_runtime::spawn(ensure_hooks_installed());
 
+            // Notification service — single owner of OS notifications.
+            // Created here so AgentTurnMod can take a reference and the
+            // window-focus handler can route clicks through it.
+            let notification_service = Arc::new(NotificationService::new(app.handle().clone()));
+            app.manage(notification_service.clone());
+
             // Build the mod engine. Hook channel is created inside the builder.
             let engine_builder = ModEngine::builder()
                 .with_mod(DirTrackerMod::new())
@@ -55,7 +62,7 @@ pub fn run() {
                 .with_mod(CodexMod::new())
                 .with_mod(ShellProcessMod::new())
                 .with_mod(GitMonitorMod::new())
-                .with_mod(AgentTurnMod::new());
+                .with_mod(AgentTurnMod::new().with_notifications(notification_service.clone()));
 
             // Start the hook HTTP server, wired to the engine's hook channel.
             let hook_tx = engine_builder.hook_sender();
@@ -71,17 +78,14 @@ pub fn run() {
             // notification click and emit `notification:click` for the
             // frontend to navigate to the right tab.
             if let Some(window) = app.get_webview_window("main") {
-                let app_handle = app.handle().clone();
+                let svc = notification_service.clone();
                 window.on_window_event(move |event| {
-                    if let WindowEvent::Focused(true) = event {
-                        if let Some(route) = notifications::routes::take_fresh() {
-                            let _ = app_handle.emit(
-                                "notification:click",
-                                serde_json::json!({
-                                    "project_id": route.project_id,
-                                    "tab_id": route.tab_id,
-                                }),
-                            );
+                    if let WindowEvent::Focused(focused) = event {
+                        // Update the foreground signal so suppression decisions
+                        // see the latest state without a frontend roundtrip.
+                        svc.set_app_focus(*focused);
+                        if *focused {
+                            svc.handle_window_focused();
                         }
                     }
                 });
@@ -97,8 +101,11 @@ pub fn run() {
             commands::close_tab,
             commands::list_projects,
             commands::save_projects,
-            notifications::show_agent_notification,
-            notifications::cancel_agent_notification,
+            notifications::notif_set_projects,
+            notifications::notif_set_active_tab,
+            notifications::notif_set_app_focus,
+            notifications::notif_set_enabled,
+            notifications::notif_cancel,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
