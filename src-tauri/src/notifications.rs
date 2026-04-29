@@ -104,12 +104,28 @@ pub async fn cancel_agent_notification(
     Ok(())
 }
 
-/// Process-wide routing table mapping notification identifier → (project_id, tab_id).
-/// Populated by `show_agent_notification`, read by the click-action handler
-/// registered in `lib.rs`. Cleared by `cancel_agent_notification` and on
-/// successful click-through.
+/// Process-wide routing table mapping notification identifier → (project_id, tab_id, timestamp).
+///
+/// Populated by `show_agent_notification`, read by the window-focus handler
+/// registered in `lib.rs`. Cleared by `cancel_agent_notification`, on
+/// successful click-through, or after the entry's TTL expires.
+///
+/// **Why time-bounded entries instead of direct click callbacks**: Tauri 2's
+/// notification plugin doesn't expose a reliable cross-platform callback for
+/// "user clicked this specific notification." Our pragmatic v1 heuristic is:
+/// if the user focuses the window within `CLICK_TTL` of posting a notification,
+/// assume that focus was a notification click and route to the most-recent
+/// fresh entry. If the user just Cmd-Tabs back to the app with no recent
+/// notification, no entry is fresh and no routing happens. The TTL is short
+/// enough that random focus events well after a notification don't trigger
+/// spurious routing, and long enough that real clicks (which happen within
+/// 1–2 seconds of the banner appearing) always land.
 pub mod routes {
     use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    /// Entries older than this are ignored — see module docs.
+    pub const CLICK_TTL: Duration = Duration::from_secs(5);
 
     static TABLE: OnceLock<Mutex<Vec<Entry>>> = OnceLock::new();
 
@@ -118,6 +134,7 @@ pub mod routes {
         pub identifier: String,
         pub project_id: String,
         pub tab_id: String,
+        pub posted_at: Instant,
     }
 
     fn table() -> &'static Mutex<Vec<Entry>> {
@@ -132,6 +149,7 @@ pub mod routes {
             identifier: identifier.to_string(),
             project_id: project_id.to_string(),
             tab_id: tab_id.to_string(),
+            posted_at: Instant::now(),
         });
     }
 
@@ -140,10 +158,22 @@ pub mod routes {
         t.retain(|e| e.identifier != identifier);
     }
 
-    /// Returns the most-recently-set routing entry. Used as a fallback when
-    /// the OS click event doesn't include the notification identifier we set
-    /// — the user almost always clicks the most-recently-fired notification.
-    pub fn most_recent() -> Option<Entry> {
-        table().lock().unwrap().last().cloned()
+    /// Returns the most-recently-set routing entry whose age is within
+    /// `CLICK_TTL`. Older entries are pruned. Once consumed, also pruned.
+    pub fn take_fresh() -> Option<Entry> {
+        let mut t = table().lock().unwrap();
+        let now = Instant::now();
+        // Prune stale entries (also keeps the table bounded).
+        t.retain(|e| now.duration_since(e.posted_at) < CLICK_TTL);
+        // Take the most recent remaining entry, removing it.
+        if let Some(idx) = t
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, e)| e.posted_at)
+            .map(|(i, _)| i)
+        {
+            return Some(t.remove(idx));
+        }
+        None
     }
 }

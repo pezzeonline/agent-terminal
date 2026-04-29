@@ -24,7 +24,7 @@ use mod_engine::{
     },
 };
 use shell_integration::setup_shell_integration;
-use tauri::Manager;
+use tauri::{Emitter, Manager, WindowEvent};
 use pty_manager::PtyMap;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -63,6 +63,30 @@ pub fn run() {
 
             let mod_engine = engine_builder.build(app.handle().clone());
             app.manage(mod_engine);
+
+            // Notification click → window focus → tab routing.
+            // When the user clicks a notification banner, macOS focuses the
+            // app window. We piggyback on that focus event: if there's a
+            // fresh route entry (posted within CLICK_TTL), assume it was a
+            // notification click and emit `notification:click` for the
+            // frontend to navigate to the right tab.
+            if let Some(window) = app.get_webview_window("main") {
+                let app_handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let WindowEvent::Focused(true) = event {
+                        if let Some(route) = notifications::routes::take_fresh() {
+                            let _ = app_handle.emit(
+                                "notification:click",
+                                serde_json::json!({
+                                    "project_id": route.project_id,
+                                    "tab_id": route.tab_id,
+                                }),
+                            );
+                        }
+                    }
+                });
+            }
+
             Ok(())
         })
         .manage(pty_map)

@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { IPC } from '@/modules/ipc/commands'
 import { startCwdPersist } from '@/modules/mods/cwd-persist'
 import { startModListener } from '@/modules/mods/mod-listener'
+import { startAgentStateNotifier } from '@/modules/notifications/agentStateNotifier'
 import { initNavigation } from '@/modules/stores/$navigation'
 import { $projects } from '@/modules/stores/$projects'
 import { WorkspaceLayout } from '@/screens/workspace/WorkspaceLayout'
@@ -27,6 +28,11 @@ async function bootstrap() {
   }
 
   initNavigation()
+
+  // Start agent-state notification service. Idempotent. Subscribes to
+  // $tabMeta and posts OS notifications on awaiting/completed transitions.
+  // Lazy permission request — does not prompt at startup.
+  startAgentStateNotifier()
 
   ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
     <React.StrictMode>
