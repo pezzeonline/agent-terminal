@@ -25,7 +25,7 @@ use mod_engine::{
 };
 use notifications::NotificationService;
 use shell_integration::setup_shell_integration;
-use tauri::{Manager, WindowEvent};
+use tauri::Manager;
 use pty_manager::PtyMap;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -49,9 +49,10 @@ pub fn run() {
             tauri::async_runtime::spawn(ensure_hooks_installed());
 
             // Notification service — single owner of OS notifications.
-            // Created here so AgentTurnMod can take a reference and the
-            // window-focus handler can route clicks through it.
-            let notification_service = Arc::new(NotificationService::new(app.handle().clone()));
+            // Backend swaps at compile time: tauri-plugin-notification in dev
+            // (banners, no clicks), user-notify in release (banners + real
+            // per-notification click callbacks via UNUserNotificationCenter).
+            let notification_service = NotificationService::new(app.handle().clone());
             app.manage(notification_service.clone());
 
             // Build the mod engine. Hook channel is created inside the builder.
@@ -71,22 +72,18 @@ pub fn run() {
             let mod_engine = engine_builder.build(app.handle().clone());
             app.manage(mod_engine);
 
-            // Notification click → window focus → tab routing.
-            // When the user clicks a notification banner, macOS focuses the
-            // app window. We piggyback on that focus event: if there's a
-            // fresh route entry (posted within CLICK_TTL), assume it was a
-            // notification click and emit `notification:click` for the
-            // frontend to navigate to the right tab.
+            // Window focus → suppression signal only.
+            // (The previous focus-event-based click heuristic is gone — it
+            // only "sometimes worked" in dev mode and was actively wrong:
+            // macOS attributes dev banners to com.apple.Terminal so the
+            // activation goes there, not us. Production click routing comes
+            // from user-notify's per-notification UNUserNotificationCenter
+            // callback — see `notifications::backend` (release path).)
             if let Some(window) = app.get_webview_window("main") {
                 let svc = notification_service.clone();
                 window.on_window_event(move |event| {
-                    if let WindowEvent::Focused(focused) = event {
-                        // Update the foreground signal so suppression decisions
-                        // see the latest state without a frontend roundtrip.
+                    if let tauri::WindowEvent::Focused(focused) = event {
                         svc.set_app_focus(*focused);
-                        if *focused {
-                            svc.handle_window_focused();
-                        }
                     }
                 });
             }

@@ -3,61 +3,44 @@
 //! `NotificationService` is the **single owner** of OS notification firing,
 //! suppression, permission, and click routing. It exposes a thin opaque
 //! `maybe_notify(tab_id, agent_id, state, message)` API that callers (today:
-//! `AgentTurnMod`) invoke when an agent transitions state. The service:
+//! `AgentTurnMod`) invoke when an agent transitions state.
 //!
-//! 1. Detects whether the transition is notification-worthy (state filter +
-//!    transition detection — same state twice is a no-op)
-//! 2. Applies suppression (master toggle + active-tab/foreground rule)
-//! 3. Resolves the human-readable display name from `AGENT_HOOK_CONFIGS`
-//! 4. Resolves the project name from a frontend-pushed projects map
-//! 5. Splits the composite tab id `<project_id>:<tab_id_within_project>` so
-//!    the click handler can route via `navigateToTab(project_id, tab_id)`
-//! 6. Calls `tauri-plugin-notification` to actually post the banner
+//! ## Two backends, swapped at compile time
+//!
+//! | Profile | Backend | Banners | Click callbacks |
+//! |---|---|---|---|
+//! | `cfg(debug_assertions)` (`tauri:dev`) | `tauri-plugin-notification` | ✅ visible | ❌ none — banners are debugging-only |
+//! | `cfg(not(debug_assertions))` (`tauri:build`) | `user-notify` (UNUserNotificationCenter on macOS) | ✅ visible | ✅ real per-notification callbacks via UNUserNotificationCenterDelegate |
+//!
+//! **Why split:** Tauri's notification plugin has zero click-handling
+//! capability on desktop (verified via plugin source + docs + maintainer
+//! statement on tauri-apps/plugins-workspace#2150) AND in dev mode it
+//! attributes notifications to `com.apple.Terminal` rather than our app.
+//! `user-notify` properly registers as the source app and delivers click
+//! events with our embedded routing data — but requires a code-signed
+//! binary, so it can't run in `tauri:dev`.
+//!
+//! Result: dev gets visible banners for development feedback (no click
+//! routing — clicks just dismiss). Production gets the full
+//! "click-and-land-on-the-right-tab" experience.
 //!
 //! ## Agent-agnosticism
 //!
 //! The service knows nothing about specific agents. It receives an `agent_id`
-//! string from the caller and looks up the display name from the registry —
-//! the same registry that drives hook installation. Adding a new agent =
-//! one entry in `AGENT_HOOK_CONFIGS` + one new mod that calls into here. No
-//! changes to this file. The `maybe_notify` call site in `AgentTurnMod` is
-//! also agent-agnostic — it forwards `payload.agent` straight through.
-//!
-//! ## State sync from the frontend
-//!
-//! The frontend pushes three signals via Tauri commands so suppression can
-//! be evaluated entirely in Rust:
-//!
-//! - `set_projects` — list of `{id, name, tabs[id]}` for project name lookup
-//! - `set_active_tab` — composite id of the currently-displayed tab (or null)
-//! - `set_app_focus` — whether the agent-terminal window is OS-foreground
-//! - `set_notifications_enabled` — master toggle (mirrors localStorage)
-//!
-//! These signals are best-effort: if any are stale, suppression may
-//! over-fire (banner shows when it shouldn't) — never under-fire (silent
-//! when it shouldn't be).
-//!
-//! ## Click routing
-//!
-//! `routes` keeps a per-tab routing entry with a 5-second TTL. The window
-//! focus handler in `lib.rs` reads `take_fresh()` on every focus event and
-//! emits `notification:click` if a fresh entry exists. The frontend
-//! subscribes and calls `navigateToTab` with the project_id + tab_id we
-//! split out of the composite.
+//! string and looks up the display name from `AGENT_HOOK_CONFIGS`. Adding a
+//! new agent = one entry in the registry + one new mod that calls into here.
+//! Architecture-conformance test enforces no agent-specific code in the
+//! frontend bridge module.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
-use tauri::{AppHandle, Emitter};
-use tauri_plugin_notification::{NotificationExt, PermissionState};
+use std::sync::{Arc, Mutex};
+use tauri::AppHandle;
 
 use crate::hook_config::config_for_agent_id;
 
 // ─── Public types ────────────────────────────────────────────────────────────
 
-/// Notification-relevant agent states. Mirrors `AgentTurnState` on the
-/// frontend; `Idle` and `InProgress` are not notification-worthy and are
-/// only tracked for transition detection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentNotifyState {
@@ -72,6 +55,19 @@ impl AgentNotifyState {
     fn fires_notification(self) -> bool {
         matches!(self, Self::Awaiting | Self::Completed | Self::Error)
     }
+
+    /// Sound name used by the dev backend (tauri-plugin-notification). The
+    /// release backend (user-notify) uses macOS's default category sound;
+    /// per-state distinction can be added later via NotificationCategory.
+    #[allow(dead_code)]
+    fn sound(self) -> &'static str {
+        match self {
+            Self::Awaiting => "Glass",
+            Self::Completed => "Pop",
+            Self::Error => "Basso",
+            _ => "default",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -85,27 +81,27 @@ pub struct ProjectInfo {
 pub struct NotificationService {
     app: AppHandle,
     inner: Mutex<Inner>,
+    /// Release-mode only: handle to the user-notify NotificationManager. Held
+    /// for its lifetime so the registered click callback stays alive.
+    /// Wrapped in Mutex<Option<...>> so it can be initialized lazily after
+    /// the service is wrapped in Arc.
+    #[cfg(not(debug_assertions))]
+    manager: Mutex<Option<std::sync::Arc<dyn user_notify::NotificationManager>>>,
 }
 
 struct Inner {
-    /// Frontend-pushed projects map for project_name lookup at notify time.
     projects: HashMap<String, ProjectInfo>,
-    /// Composite `<project_id>:<tab_id>` of the currently-active tab.
     active_tab: Option<String>,
-    /// Window focus state (true = agent-terminal is the OS frontmost app).
     app_foreground: bool,
-    /// Per-tab last-notified state — for transition detection.
     last_state: HashMap<String, AgentNotifyState>,
-    /// Has the macOS permission prompt been resolved this app session?
     permission_resolved: bool,
     permission_granted: bool,
-    /// Master enable toggle (mirrors a frontend localStorage key). Default: true.
     enabled: bool,
 }
 
 impl NotificationService {
-    pub fn new(app: AppHandle) -> Self {
-        Self {
+    pub fn new(app: AppHandle) -> Arc<Self> {
+        let svc = Arc::new(Self {
             app,
             inner: Mutex::new(Inner {
                 projects: HashMap::new(),
@@ -116,7 +112,11 @@ impl NotificationService {
                 permission_granted: false,
                 enabled: true,
             }),
-        }
+            #[cfg(not(debug_assertions))]
+            manager: Mutex::new(None),
+        });
+        backend::init(&svc);
+        svc
     }
 
     pub fn set_projects(&self, projects: Vec<ProjectInfo>) {
@@ -139,65 +139,60 @@ impl NotificationService {
         self.inner.lock().unwrap().enabled = enabled;
     }
 
-    /// Drop any pending notification and routing for `composite_tab_id`.
-    /// Called when the user navigates to a tab (acknowledgement) or the
-    /// tab is closed.
     pub fn cancel(&self, composite_tab_id: &str) {
         self.inner
             .lock()
             .unwrap()
             .last_state
             .remove(composite_tab_id);
-        routes::clear(&identifier_for_tab(composite_tab_id));
+        backend::cancel(self, composite_tab_id);
     }
 
     /// Decide whether to fire and, if so, post the OS notification.
     ///
-    /// Spawned async because the permission check + plugin call are async.
     /// All transition / suppression logic is synchronous and runs inside
-    /// the Mutex lock so we can decide & commit `last_state` atomically.
+    /// the Mutex lock. Backend dispatch happens after the lock drops.
     pub fn maybe_notify(
-        self: std::sync::Arc<Self>,
+        self: Arc<Self>,
         composite_tab_id: String,
         agent_id: String,
         state: AgentNotifyState,
         message: Option<String>,
     ) {
-        // Step 1 — synchronous decision.
         let payload = {
             let mut inner = self.inner.lock().unwrap();
 
             if !inner.enabled {
+                eprintln!(
+                    "[notifications] suppressed (master toggle off): tab={composite_tab_id} state={state:?}"
+                );
                 return;
             }
 
-            // Transition detection — always update `last_state` so future
-            // transitions are detected correctly, even when we don't fire.
             let prev = inner.last_state.get(&composite_tab_id).copied();
-            inner
-                .last_state
-                .insert(composite_tab_id.clone(), state);
+            inner.last_state.insert(composite_tab_id.clone(), state);
 
             if !state.fires_notification() {
-                return;
+                return; // idle / in-progress are tracked but never notify
             }
             if Some(state) == prev {
                 return; // already notified for this state
             }
 
             // Suppression: window foreground AND this is the active tab.
-            // (Future: tighten with xterm-focus signal — see plan rev
-            // 2026-04-29.)
+            // (Future: tighten with xterm-focus signal — see plan rev 2026-04-29.)
             if inner.app_foreground
                 && inner.active_tab.as_deref() == Some(composite_tab_id.as_str())
             {
+                eprintln!(
+                    "[notifications] suppressed (foreground+active): tab={composite_tab_id} state={state:?}"
+                );
                 return;
             }
 
-            // Resolve project_id + tab_id from composite. Click routing needs
-            // both (frontend's navigateToTab takes project_id + tab_id-within-
-            // project). The split must succeed; if it doesn't, the composite
-            // is malformed and we bail rather than misroute.
+            // Split composite tab id — frontend's navigateToTab expects
+            // (project_id, tab_id_within_project). The split must succeed;
+            // malformed composites get dropped rather than misrouted.
             let (project_id, tab_id_in_project) = match composite_tab_id.split_once(':') {
                 Some((p, t)) if !p.is_empty() && !t.is_empty() => {
                     (p.to_string(), t.to_string())
@@ -210,7 +205,6 @@ impl NotificationService {
                 }
             };
 
-            // Resolve project name (fall back to project_id if not synced yet).
             let project_name = inner
                 .projects
                 .get(&project_id)
@@ -228,7 +222,7 @@ impl NotificationService {
                 (_, AgentNotifyState::Awaiting) => "Needs your attention".to_string(),
                 (_, AgentNotifyState::Completed) => "Turn complete".to_string(),
                 (_, AgentNotifyState::Error) => "Agent exited unexpectedly".to_string(),
-                _ => return, // unreachable, guarded above
+                _ => return,
             };
 
             FirePayload {
@@ -241,85 +235,34 @@ impl NotificationService {
             }
         };
 
-        // Step 2 — async firing (permission + plugin call). Detached.
+        // Async firing path — backend chooses how to deliver.
         let svc = self;
         tauri::async_runtime::spawn(async move {
             if !svc.ensure_permission().await {
+                eprintln!("[notifications] permission denied — skipping");
                 return;
             }
-            let identifier = identifier_for_tab(&payload.composite_tab_id);
-            let sound = match payload.state {
-                AgentNotifyState::Awaiting => "Glass",
-                AgentNotifyState::Completed => "Pop",
-                AgentNotifyState::Error => "Basso",
-                _ => "default",
-            };
-
-            let result = svc
-                .app
-                .notification()
-                .builder()
-                .title(&payload.title)
-                .body(&payload.body)
-                .sound(sound)
-                .show();
-
-            match result {
-                Ok(()) => {
-                    routes::set(
-                        &identifier,
-                        &payload.project_id,
-                        &payload.tab_id_in_project,
-                    );
-                }
-                Err(e) => {
-                    eprintln!("[notifications] show failed: {e}");
-                }
-            }
+            backend::fire(&svc, payload).await;
         });
     }
 
-    /// First call: ask the OS. Subsequent calls: cached answer. macOS shows
-    /// the prompt the first time — see plan Journey 14 for the lazy
-    /// permission UX rationale.
     async fn ensure_permission(&self) -> bool {
-        // Fast path with the lock held very briefly.
         {
             let inner = self.inner.lock().unwrap();
             if inner.permission_resolved {
                 return inner.permission_granted;
             }
         }
-
-        let granted = match self.app.notification().permission_state() {
-            Ok(PermissionState::Granted) => true,
-            _ => match self.app.notification().request_permission() {
-                Ok(PermissionState::Granted) => true,
-                _ => false,
-            },
-        };
-
+        let granted = backend::ensure_permission(self).await;
         let mut inner = self.inner.lock().unwrap();
         inner.permission_resolved = true;
         inner.permission_granted = granted;
         granted
     }
-
-    /// Called by the window-focus handler in `lib.rs`. If a fresh route
-    /// exists, emit `notification:click` so the frontend navigates.
-    pub fn handle_window_focused(&self) {
-        if let Some(route) = routes::take_fresh() {
-            let _ = self.app.emit(
-                "notification:click",
-                serde_json::json!({
-                    "project_id": route.project_id,
-                    "tab_id": route.tab_id,
-                }),
-            );
-        }
-    }
 }
 
+#[derive(Debug)]
+#[allow(dead_code)] // project_id + tab_id_in_project only used by release backend
 struct FirePayload {
     composite_tab_id: String,
     project_id: String,
@@ -333,7 +276,7 @@ struct FirePayload {
 
 #[tauri::command]
 pub async fn notif_set_projects(
-    service: tauri::State<'_, std::sync::Arc<NotificationService>>,
+    service: tauri::State<'_, Arc<NotificationService>>,
     projects: Vec<ProjectInfo>,
 ) -> Result<(), String> {
     service.set_projects(projects);
@@ -342,7 +285,7 @@ pub async fn notif_set_projects(
 
 #[tauri::command]
 pub async fn notif_set_active_tab(
-    service: tauri::State<'_, std::sync::Arc<NotificationService>>,
+    service: tauri::State<'_, Arc<NotificationService>>,
     tab_id: Option<String>,
 ) -> Result<(), String> {
     service.set_active_tab(tab_id);
@@ -351,7 +294,7 @@ pub async fn notif_set_active_tab(
 
 #[tauri::command]
 pub async fn notif_set_app_focus(
-    service: tauri::State<'_, std::sync::Arc<NotificationService>>,
+    service: tauri::State<'_, Arc<NotificationService>>,
     focused: bool,
 ) -> Result<(), String> {
     service.set_app_focus(focused);
@@ -360,7 +303,7 @@ pub async fn notif_set_app_focus(
 
 #[tauri::command]
 pub async fn notif_set_enabled(
-    service: tauri::State<'_, std::sync::Arc<NotificationService>>,
+    service: tauri::State<'_, Arc<NotificationService>>,
     enabled: bool,
 ) -> Result<(), String> {
     service.set_enabled(enabled);
@@ -369,69 +312,168 @@ pub async fn notif_set_enabled(
 
 #[tauri::command]
 pub async fn notif_cancel(
-    service: tauri::State<'_, std::sync::Arc<NotificationService>>,
+    service: tauri::State<'_, Arc<NotificationService>>,
     tab_id: String,
 ) -> Result<(), String> {
     service.cancel(&tab_id);
     Ok(())
 }
 
-// ─── Routing table for click → tab navigation ────────────────────────────────
+// ─── Backend selection ───────────────────────────────────────────────────────
 
-fn identifier_for_tab(composite_tab_id: &str) -> String {
-    format!("agent-terminal:tab:{composite_tab_id}")
+#[cfg(debug_assertions)]
+mod backend {
+    //! Dev backend — `tauri-plugin-notification`.
+    //!
+    //! Visible banners for development feedback. **No click handling**:
+    //! the plugin has no callback API on desktop, AND in dev mode it
+    //! attributes the notification to `com.apple.Terminal` so even if we
+    //! tried to detect clicks via window-focus events, macOS routes the
+    //! activation to Terminal.app, not us. We deliberately do nothing on
+    //! click — banners just dismiss. Production gets the real thing via
+    //! the `user-notify` backend.
+
+    use super::{FirePayload, NotificationService};
+    use std::sync::Arc;
+    use tauri_plugin_notification::{NotificationExt, PermissionState};
+
+    pub fn init(_svc: &Arc<NotificationService>) {
+        eprintln!(
+            "[notifications] dev backend (tauri-plugin-notification) — banners visible, click routing disabled"
+        );
+    }
+
+    pub async fn fire(svc: &Arc<NotificationService>, payload: FirePayload) {
+        eprintln!(
+            "[notifications] (dev) firing: tab={} state={:?} title={:?} body={:?}",
+            payload.composite_tab_id, payload.state, payload.title, payload.body,
+        );
+        if let Err(e) = svc
+            .app
+            .notification()
+            .builder()
+            .title(&payload.title)
+            .body(&payload.body)
+            .sound(payload.state.sound())
+            .show()
+        {
+            eprintln!("[notifications] (dev) show failed: {e}");
+        }
+    }
+
+    pub fn cancel(_svc: &NotificationService, composite_tab_id: &str) {
+        eprintln!("[notifications] (dev) cancel: tab={composite_tab_id}");
+        // tauri-plugin-notification has no programmatic cancellation on desktop.
+    }
+
+    pub async fn ensure_permission(svc: &NotificationService) -> bool {
+        let plugin = svc.app.notification();
+        let granted = matches!(plugin.permission_state(), Ok(PermissionState::Granted))
+            || matches!(plugin.request_permission(), Ok(PermissionState::Granted));
+        eprintln!("[notifications] (dev) permission granted = {granted}");
+        granted
+    }
 }
 
-pub mod routes {
-    use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, Instant};
+#[cfg(not(debug_assertions))]
+mod backend {
+    //! Release backend — `user-notify` wrapping native UNUserNotificationCenter.
+    //!
+    //! Per-notification click callbacks delivered via the OS delegate. Each
+    //! notification carries its routing data in `user_info` so the callback
+    //! gets `project_id` + `tab_id` directly — no focus-event heuristics.
 
-    /// Click events older than this are ignored — protects against random
-    /// window-focus events (e.g. Cmd-Tab) routing to a stale tab.
-    pub const CLICK_TTL: Duration = Duration::from_secs(5);
+    use super::{FirePayload, NotificationService};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tauri::Emitter;
+    use user_notify::{NotificationBuilder, get_notification_manager};
 
-    static TABLE: OnceLock<Mutex<Vec<Entry>>> = OnceLock::new();
+    /// Initialize the user-notify manager and register the click callback.
+    /// Stores the manager on the service so it stays alive for the app's
+    /// lifetime (and the registered delegate stays attached).
+    pub fn init(svc: &Arc<NotificationService>) {
+        let bundle_id = svc.app.config().identifier.clone();
+        let manager = get_notification_manager(bundle_id, None);
 
-    #[derive(Clone)]
-    pub struct Entry {
-        pub identifier: String,
-        pub project_id: String,
-        pub tab_id: String,
-        pub posted_at: Instant,
-    }
-
-    fn table() -> &'static Mutex<Vec<Entry>> {
-        TABLE.get_or_init(|| Mutex::new(Vec::new()))
-    }
-
-    pub fn set(identifier: &str, project_id: &str, tab_id: &str) {
-        let mut t = table().lock().unwrap();
-        t.retain(|e| e.identifier != identifier);
-        t.push(Entry {
-            identifier: identifier.to_string(),
-            project_id: project_id.to_string(),
-            tab_id: tab_id.to_string(),
-            posted_at: Instant::now(),
-        });
-    }
-
-    pub fn clear(identifier: &str) {
-        let mut t = table().lock().unwrap();
-        t.retain(|e| e.identifier != identifier);
-    }
-
-    pub fn take_fresh() -> Option<Entry> {
-        let mut t = table().lock().unwrap();
-        let now = Instant::now();
-        t.retain(|e| now.duration_since(e.posted_at) < CLICK_TTL);
-        if let Some(idx) = t
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, e)| e.posted_at)
-            .map(|(i, _)| i)
-        {
-            return Some(t.remove(idx));
+        // The callback fires when the user clicks a banner OR a notification
+        // in Notification Center. Extract our embedded routing data from
+        // user_info and emit a frontend event the bridge already listens for.
+        let app = svc.app.clone();
+        let result = manager.register(
+            Box::new(move |response| {
+                let info = &response.user_info;
+                let project_id = info.get("project_id").cloned().unwrap_or_default();
+                let tab_id = info.get("tab_id").cloned().unwrap_or_default();
+                if project_id.is_empty() || tab_id.is_empty() {
+                    eprintln!(
+                        "[notifications] click with no routing data: {:?}",
+                        response,
+                    );
+                    return;
+                }
+                let _ = app.emit(
+                    "notification:click",
+                    serde_json::json!({
+                        "project_id": project_id,
+                        "tab_id": tab_id,
+                    }),
+                );
+            }),
+            Vec::new(), // No interactive buttons / reply inputs in v1.
+        );
+        if let Err(e) = result {
+            eprintln!("[notifications] failed to register user-notify callback: {e}");
+            return;
         }
-        None
+        *svc.manager.lock().unwrap() = Some(manager);
+    }
+
+    pub async fn fire(svc: &Arc<NotificationService>, payload: FirePayload) {
+        let manager = match svc.manager.lock().unwrap().clone() {
+            Some(m) => m,
+            None => {
+                eprintln!("[notifications] manager not initialized");
+                return;
+            }
+        };
+
+        let mut user_info = HashMap::new();
+        user_info.insert("project_id".to_string(), payload.project_id.clone());
+        user_info.insert("tab_id".to_string(), payload.tab_id_in_project.clone());
+
+        // Thread id groups + replaces successive notifications for the same
+        // tab in Notification Center — same effect as our prior identifier
+        // scheme.
+        let thread_id = format!("agent-terminal:tab:{}", payload.composite_tab_id);
+
+        let builder = NotificationBuilder::new()
+            .title(&payload.title)
+            .body(&payload.body)
+            .set_thread_id(&thread_id)
+            .set_user_info(user_info);
+
+        if let Err(e) = manager.send_notification(builder).await {
+            eprintln!("[notifications] user-notify send failed: {e}");
+        }
+    }
+
+    pub fn cancel(svc: &NotificationService, composite_tab_id: &str) {
+        let Some(manager) = svc.manager.lock().unwrap().clone() else { return };
+        let id = format!("agent-terminal:tab:{composite_tab_id}");
+        let _ = manager.remove_delivered_notifications(vec![&id]);
+    }
+
+    pub async fn ensure_permission(svc: &NotificationService) -> bool {
+        let Some(manager) = svc.manager.lock().unwrap().clone() else {
+            return false;
+        };
+        if let Ok(true) = manager.get_notification_permission_state().await {
+            return true;
+        }
+        manager
+            .first_time_ask_for_notification_permission()
+            .await
+            .unwrap_or(false)
     }
 }
