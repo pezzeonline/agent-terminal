@@ -124,17 +124,23 @@ fn start_collector(listener: TcpListener) -> CollectorServer {
 /// Pipes `payload` to `script event` via stdin and waits for the child to exit.
 /// Returns the elapsed wall-clock time.
 fn run_hook(script: &PathBuf, event: &str, payload: &str) -> Duration {
-    run_hook_with_env(script, event, payload, &[])
+    run_hook_with_env(script, event, payload, &[], &[])
 }
 
-/// Runs the hook script with an explicit set of env vars added to its
-/// environment. Used to verify that the script forwards
-/// `AGENT_TERMINAL_TAB_ID` into the POST payload.
+/// Runs the hook script with explicit env-var additions and removals.
+///
+/// `env_overrides` SETs values; `env_removes` UNSETs the named variables in
+/// the child environment entirely. Setting a variable to "" is **not** the
+/// same as removing it — the script's `case` check distinguishes the two,
+/// and tests for the "unset" path must use `env_removes` to genuinely
+/// exercise it. (Otherwise a future regression that switches the script's
+/// guard from `case ''` to a `[ -v VAR ]` check would slip through silently.)
 fn run_hook_with_env(
     script: &PathBuf,
     event: &str,
     payload: &str,
     env_overrides: &[(&str, &str)],
+    env_removes: &[&str],
 ) -> Duration {
     let start = Instant::now();
     let mut cmd = Command::new(script);
@@ -144,6 +150,9 @@ fn run_hook_with_env(
         .stderr(Stdio::null());
     for (k, v) in env_overrides {
         cmd.env(k, v);
+    }
+    for k in env_removes {
+        cmd.env_remove(k);
     }
     let mut child = cmd
         .spawn()
@@ -507,6 +516,7 @@ async fn i9_claude_hook_forwards_tab_id_when_env_set() {
         "SessionStart",
         payload,
         &[("AGENT_TERMINAL_TAB_ID", "proj-A:tab-42")],
+        &[],
     );
 
     let got = wait_for_payload(&server.received)
@@ -527,9 +537,15 @@ async fn i9_claude_hook_forwards_tab_id_when_env_set() {
 // ─── I10: tab_id field omitted when env var is unset ─────────────────────────
 
 /// Confirms the script omits the `tab_id` field entirely when
-/// `AGENT_TERMINAL_TAB_ID` is unset (claude/codex running outside
-/// agent-terminal). Server-side that becomes `HookPayload::tab_id == None`,
-/// which `AgentTurnMod` uses to drop the event.
+/// `AGENT_TERMINAL_TAB_ID` is **not present in the environment** (claude/codex
+/// running outside agent-terminal). Server-side that becomes
+/// `HookPayload::tab_id == None`, which `AgentTurnMod` uses to drop the event.
+///
+/// This test uses `env_remove`, NOT a `set-to-empty-string` override —
+/// "unset" and "set to empty" are semantically distinct in shell scripts,
+/// and we need to exercise the genuinely-unset path so a future regression
+/// that switches the guard (e.g. from `case ''` to `[ -v VAR ]`) gets
+/// caught.
 #[tokio::test]
 async fn i10_claude_hook_omits_tab_id_when_env_unset() {
     let _g = acquire_port_lock();
@@ -545,17 +561,16 @@ async fn i10_claude_hook_omits_tab_id_when_env_unset() {
     };
     let server = start_collector(listener);
 
-    // No env override — we want to confirm the absent-env path.
     let payload = r#"{"session_id":"test-session-i10","cwd":"/tmp/i10-project"}"#;
-    // The current process may itself be running under agent-terminal during
-    // dev (the env var would leak into the spawned script). Explicitly clear
-    // it so this test is meaningful regardless of how `cargo test` was
-    // invoked.
+    // Genuinely remove the var — the calling cargo-test process may itself
+    // be running inside agent-terminal, in which case the env would leak
+    // into the spawned script and silently mask the bug.
     run_hook_with_env(
         &script,
         "SessionStart",
         payload,
-        &[("AGENT_TERMINAL_TAB_ID", "")],
+        &[],
+        &["AGENT_TERMINAL_TAB_ID"],
     );
 
     let got = wait_for_payload(&server.received)
@@ -567,6 +582,58 @@ async fn i10_claude_hook_omits_tab_id_when_env_unset() {
     assert!(
         got.get("tab_id").is_none(),
         "tab_id must be omitted when AGENT_TERMINAL_TAB_ID is unset, got: {got:?}"
+    );
+}
+
+// ─── I11: tab_id field omitted when env value contains unsafe chars ──────────
+
+/// Defense-in-depth check on the script-side charset guard. Tab ids today
+/// are composite frontend identifiers (`<projectId>:<tabId>`) and never
+/// contain anything outside `[A-Za-z0-9:_-]`. But the script interpolates
+/// the value raw into a JSON string, so any future change to the tab-id
+/// format that introduces an unsafe character (`"`, `\`, newline, etc.)
+/// would corrupt the payload or inject extra fields.
+///
+/// The script's `case` guard omits the field entirely on any unexpected
+/// character. This test confirms that fail-safe path: hostile-looking input
+/// degrades to "no correlation", not "malformed POST" or "field injection".
+#[tokio::test]
+async fn i11_claude_hook_omits_tab_id_when_value_unsafe() {
+    let _g = acquire_port_lock();
+
+    let script = claude_hook();
+    if !script.exists() {
+        eprintln!("SKIP i11: claude-hook not installed");
+        return;
+    }
+    let Some(listener) = try_bind_hook_port().await else {
+        eprintln!("SKIP i11: port 47384 busy");
+        return;
+    };
+    let server = start_collector(listener);
+
+    let payload = r#"{"session_id":"test-session-i11","cwd":"/tmp/i11-project"}"#;
+    // Embedded `"` would close the JSON string early and inject extra
+    // fields if the script didn't validate the env value.
+    run_hook_with_env(
+        &script,
+        "SessionStart",
+        payload,
+        &[("AGENT_TERMINAL_TAB_ID", "evil\",\"injected\":\"true")],
+        &[],
+    );
+
+    let got = wait_for_payload(&server.received)
+        .await
+        .expect("no payload received within 3s");
+
+    assert!(
+        got.get("tab_id").is_none(),
+        "tab_id must be omitted when the env value contains unsafe chars, got: {got:?}"
+    );
+    assert!(
+        got.get("injected").is_none(),
+        "no injected field should appear in the payload"
     );
 }
 

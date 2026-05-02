@@ -217,6 +217,16 @@ fn build_hook_script(agent_id: &str) -> String {
     // entirely when AGENT_TERMINAL_TAB_ID is unset. Inserting an empty string
     // would produce a `"tab_id":""` field; the server's gate explicitly
     // rejects empty strings too, but emitting nothing is cleaner.
+    //
+    // Defense-in-depth: the env value is validated against a strict charset
+    // before going into the JSON. Today, tab ids are composite frontend
+    // identifiers (`<projectId>:<tabId>`) — never user-controllable — so a
+    // hostile value can't actually arrive. But the script interpolates the
+    // value raw into a JSON string, which would corrupt the payload (or
+    // inject extra fields) if a `"`, `\`, or newline ever slipped through.
+    // The case statement omits the field on any unexpected character, so a
+    // future change to the tab-id format that introduces unsafe chars
+    // degrades to "no correlation" rather than "malformed POST".
     format!(
         "#!/bin/sh\n\
 # Written by Agent Terminal. Do not edit — regenerated on each launch.\n\
@@ -224,11 +234,11 @@ fn build_hook_script(agent_id: &str) -> String {
 INPUT=$(cat)\n\
 EVENT=\"$1\"\n\
 STRIPPED=$(printf '%s' \"$INPUT\" | sed 's/^{{//')\n\
-if [ -n \"$AGENT_TERMINAL_TAB_ID\" ]; then\n\
-  TAB_FIELD=\"\\\"tab_id\\\":\\\"$AGENT_TERMINAL_TAB_ID\\\",\"\n\
-else\n\
-  TAB_FIELD=\"\"\n\
-fi\n\
+case \"$AGENT_TERMINAL_TAB_ID\" in\n\
+  '') TAB_FIELD=\"\" ;;\n\
+  *[!A-Za-z0-9:_-]*) TAB_FIELD=\"\" ;;\n\
+  *) TAB_FIELD=\"\\\"tab_id\\\":\\\"$AGENT_TERMINAL_TAB_ID\\\",\" ;;\n\
+esac\n\
 PAYLOAD=\"{{\\\"agent\\\":\\\"{agent_id}\\\",\\\"event\\\":\\\"$EVENT\\\",${{TAB_FIELD}}$STRIPPED\"\n\
 {{ curl -sf --max-time 5 -X POST http://127.0.0.1:47384/hook \\\n\
     -H 'Content-Type: application/json' \\\n\
