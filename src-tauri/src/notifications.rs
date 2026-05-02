@@ -170,16 +170,25 @@ impl NotificationService {
             }
 
             let prev = inner.last_state.get(&composite_tab_id).copied();
-            inner.last_state.insert(composite_tab_id.clone(), state);
 
+            // Non-firing states (idle / in-progress) update last_state so
+            // future transitions are correctly detected (e.g. Completed →
+            // InProgress → Completed must fire the second Completed because
+            // an intermediate state happened).
             if !state.fires_notification() {
-                return; // idle / in-progress are tracked but never notify
-            }
-            if Some(state) == prev {
-                return; // already notified for this state
+                inner.last_state.insert(composite_tab_id.clone(), state);
+                return;
             }
 
-            // Suppression: window foreground AND this is the active tab.
+            // Same state as last NOTIFIED state — already covered, no refire.
+            if Some(state) == prev {
+                return;
+            }
+
+            // Suppression check (window foreground AND active tab match).
+            // CRITICAL: we deliberately do NOT update last_state when
+            // suppressing, so that if the user moves to a different tab
+            // and the SAME state arrives again, it will fire correctly.
             // (Future: tighten with xterm-focus signal — see plan rev 2026-04-29.)
             if inner.app_foreground
                 && inner.active_tab.as_deref() == Some(composite_tab_id.as_str())
@@ -189,6 +198,10 @@ impl NotificationService {
                 );
                 return;
             }
+
+            // Past suppression — record the state we're about to notify for
+            // so a duplicate transition into the same state won't double-fire.
+            inner.last_state.insert(composite_tab_id.clone(), state);
 
             // Split composite tab id — frontend's navigateToTab expects
             // (project_id, tab_id_within_project). The split must succeed;
@@ -253,12 +266,54 @@ impl NotificationService {
                 return inner.permission_granted;
             }
         }
-        let granted = backend::ensure_permission(self).await;
-        let mut inner = self.inner.lock().unwrap();
-        inner.permission_resolved = true;
-        inner.permission_granted = granted;
-        granted
+        let outcome = backend::ensure_permission(self).await;
+        match outcome {
+            // OS gave us a real Yes/No — cache it for the rest of the session.
+            // (macOS's permission state only changes via System Settings, and
+            // even that only takes effect after restart for our app — so
+            // caching is safe.)
+            PermissionOutcome::Granted => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.permission_resolved = true;
+                inner.permission_granted = true;
+                true
+            }
+            PermissionOutcome::Denied => {
+                let mut inner = self.inner.lock().unwrap();
+                inner.permission_resolved = true;
+                inner.permission_granted = false;
+                false
+            }
+            // Manager wasn't ready when we asked — almost certainly a startup
+            // race where init() hadn't finished dispatching to the main thread
+            // before the first notification fired. Don't cache; let the next
+            // call retry. Otherwise the very first failed-because-unready
+            // permission check would lock the service into "denied" forever.
+            PermissionOutcome::NotReady => {
+                eprintln!(
+                    "[notifications] permission check ran before manager init completed — will retry on next notification"
+                );
+                false
+            }
+        }
     }
+}
+
+/// Result of a permission check from the backend. Distinguishes a real OS
+/// answer (cacheable for the session) from a transient "manager not yet
+/// initialized" condition (must be retried).
+///
+/// `NotReady` is only constructed by the release backend (where init runs
+/// async via run_on_main_thread). The dev backend always returns a real
+/// Granted/Denied because tauri-plugin-notification works synchronously.
+/// Hence the `#[allow(dead_code)]` for dev builds — the variant exists in
+/// both profiles for type stability but is unused in one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub enum PermissionOutcome {
+    Granted,
+    Denied,
+    NotReady,
 }
 
 #[derive(Debug)]
@@ -366,12 +421,12 @@ mod backend {
         // tauri-plugin-notification has no programmatic cancellation on desktop.
     }
 
-    pub async fn ensure_permission(svc: &NotificationService) -> bool {
+    pub async fn ensure_permission(svc: &NotificationService) -> super::PermissionOutcome {
         let plugin = svc.app.notification();
         let granted = matches!(plugin.permission_state(), Ok(PermissionState::Granted))
             || matches!(plugin.request_permission(), Ok(PermissionState::Granted));
         eprintln!("[notifications] (dev) permission granted = {granted}");
-        granted
+        if granted { super::PermissionOutcome::Granted } else { super::PermissionOutcome::Denied }
     }
 }
 
@@ -513,9 +568,12 @@ mod backend {
         });
     }
 
-    pub async fn ensure_permission(svc: &NotificationService) -> bool {
+    pub async fn ensure_permission(svc: &NotificationService) -> super::PermissionOutcome {
+        // If init hasn't finished dispatching to the main thread yet, the
+        // manager is still None. That's transient — return NotReady so the
+        // caller doesn't cache this as a permanent denial.
         let Some(manager) = svc.manager.lock().unwrap().clone() else {
-            return false;
+            return super::PermissionOutcome::NotReady;
         };
         // Both permission calls must run on main thread.
         let (tx, rx) = oneshot::channel();
@@ -533,9 +591,16 @@ mod backend {
             let _ = tx.send(granted);
         });
         if let Err(e) = dispatch {
+            // Failure to dispatch to main thread is also transient (could be
+            // an event loop quirk during startup). Treat as NotReady rather
+            // than caching denial.
             eprintln!("[notifications] failed to dispatch permission to main thread: {e}");
-            return false;
+            return super::PermissionOutcome::NotReady;
         }
-        rx.await.unwrap_or(false)
+        match rx.await {
+            Ok(true) => super::PermissionOutcome::Granted,
+            Ok(false) => super::PermissionOutcome::Denied,
+            Err(_) => super::PermissionOutcome::NotReady,
+        }
     }
 }
