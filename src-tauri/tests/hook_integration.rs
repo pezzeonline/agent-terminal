@@ -124,12 +124,28 @@ fn start_collector(listener: TcpListener) -> CollectorServer {
 /// Pipes `payload` to `script event` via stdin and waits for the child to exit.
 /// Returns the elapsed wall-clock time.
 fn run_hook(script: &PathBuf, event: &str, payload: &str) -> Duration {
+    run_hook_with_env(script, event, payload, &[])
+}
+
+/// Runs the hook script with an explicit set of env vars added to its
+/// environment. Used to verify that the script forwards
+/// `AGENT_TERMINAL_TAB_ID` into the POST payload.
+fn run_hook_with_env(
+    script: &PathBuf,
+    event: &str,
+    payload: &str,
+    env_overrides: &[(&str, &str)],
+) -> Duration {
     let start = Instant::now();
-    let mut child = Command::new(script)
-        .arg(event)
+    let mut cmd = Command::new(script);
+    cmd.arg(event)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    for (k, v) in env_overrides {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn {}: {e}", script.display()));
 
@@ -461,6 +477,97 @@ async fn i6_real_codex_hooks_no_duplicates() {
             "duplicate agent-terminal entry in {event}: {our_cmds:?}"
         );
     }
+}
+
+// ─── I9: tab_id forwarded when AGENT_TERMINAL_TAB_ID is set ──────────────────
+
+/// Confirms the hook script forwards `AGENT_TERMINAL_TAB_ID` from the env
+/// into a `tab_id` field on the POST payload. This is the load-bearing
+/// signal for the cross-terminal-noise gate in `AgentTurnMod`: without it,
+/// any claude/codex session anywhere on the machine triggers notifications
+/// for whichever agent-terminal tab happens to share its CWD.
+#[tokio::test]
+async fn i9_claude_hook_forwards_tab_id_when_env_set() {
+    let _g = acquire_port_lock();
+
+    let script = claude_hook();
+    if !script.exists() {
+        eprintln!("SKIP i9: claude-hook not installed");
+        return;
+    }
+    let Some(listener) = try_bind_hook_port().await else {
+        eprintln!("SKIP i9: port 47384 busy");
+        return;
+    };
+    let server = start_collector(listener);
+
+    let payload = r#"{"session_id":"test-session-i9","cwd":"/tmp/i9-project"}"#;
+    run_hook_with_env(
+        &script,
+        "SessionStart",
+        payload,
+        &[("AGENT_TERMINAL_TAB_ID", "proj-A:tab-42")],
+    );
+
+    let got = wait_for_payload(&server.received)
+        .await
+        .expect("no payload received within 3s");
+
+    assert_eq!(got["agent"], "claude-code");
+    assert_eq!(got["event"], "SessionStart");
+    assert_eq!(
+        got["tab_id"], "proj-A:tab-42",
+        "tab_id must be forwarded from $AGENT_TERMINAL_TAB_ID"
+    );
+    // session_id and cwd still pass through untouched.
+    assert_eq!(got["session_id"], "test-session-i9");
+    assert_eq!(got["cwd"], "/tmp/i9-project");
+}
+
+// ─── I10: tab_id field omitted when env var is unset ─────────────────────────
+
+/// Confirms the script omits the `tab_id` field entirely when
+/// `AGENT_TERMINAL_TAB_ID` is unset (claude/codex running outside
+/// agent-terminal). Server-side that becomes `HookPayload::tab_id == None`,
+/// which `AgentTurnMod` uses to drop the event.
+#[tokio::test]
+async fn i10_claude_hook_omits_tab_id_when_env_unset() {
+    let _g = acquire_port_lock();
+
+    let script = claude_hook();
+    if !script.exists() {
+        eprintln!("SKIP i10: claude-hook not installed");
+        return;
+    }
+    let Some(listener) = try_bind_hook_port().await else {
+        eprintln!("SKIP i10: port 47384 busy");
+        return;
+    };
+    let server = start_collector(listener);
+
+    // No env override — we want to confirm the absent-env path.
+    let payload = r#"{"session_id":"test-session-i10","cwd":"/tmp/i10-project"}"#;
+    // The current process may itself be running under agent-terminal during
+    // dev (the env var would leak into the spawned script). Explicitly clear
+    // it so this test is meaningful regardless of how `cargo test` was
+    // invoked.
+    run_hook_with_env(
+        &script,
+        "SessionStart",
+        payload,
+        &[("AGENT_TERMINAL_TAB_ID", "")],
+    );
+
+    let got = wait_for_payload(&server.received)
+        .await
+        .expect("no payload received within 3s");
+
+    assert_eq!(got["agent"], "claude-code");
+    assert_eq!(got["event"], "SessionStart");
+    assert!(
+        got.get("tab_id").is_none(),
+        "tab_id must be omitted when AGENT_TERMINAL_TAB_ID is unset, got: {got:?}"
+    );
 }
 
 // ─── E2E (guided / interactive) helpers ──────────────────────────────────────
