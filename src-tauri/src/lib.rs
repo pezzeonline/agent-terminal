@@ -35,6 +35,18 @@ pub fn run() {
     let pty_map: PtyMap = Arc::new(Mutex::new(HashMap::new()));
 
     tauri::Builder::default()
+        // Single-instance MUST be the first plugin so duplicate launches
+        // (notification clicks routing to a fresh .app, double-clicking the
+        // dock icon, etc.) get intercepted before any other plugin tries to
+        // initialize. The callback runs in the EXISTING process and just
+        // re-focuses the window.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())

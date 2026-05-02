@@ -18,6 +18,12 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+# Ensures only one Agent Terminal instance runs at a time. Critical on macOS
+# for notification click routing: without it, clicking a notification can
+# launch a fresh .app process while the original one keeps running. With it,
+# Launch Services forwards the duplicate-launch attempt to the existing
+# process instead.
+tauri-plugin-single-instance = "2"
 # Dev-mode banner display only (debug_assertions = true). On macOS in dev this
 # attributes notifications to com.apple.Terminal, which is fine for visibility
 # but means clicks don't route back to us — see the focus-event heuristic.

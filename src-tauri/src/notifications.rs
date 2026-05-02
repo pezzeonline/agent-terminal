@@ -382,51 +382,83 @@ mod backend {
     //! Per-notification click callbacks delivered via the OS delegate. Each
     //! notification carries its routing data in `user_info` so the callback
     //! gets `project_id` + `tab_id` directly — no focus-event heuristics.
+    //!
+    //! ## Threading
+    //!
+    //! All UNUserNotificationCenter / NSUserNotificationCenterDelegate calls
+    //! MUST run on the macOS main thread (Cocoa is not thread-safe). user-notify
+    //! itself doesn't enforce this — it just calls the underlying objc2 APIs,
+    //! which silently no-op when called off main. Symptom of getting this
+    //! wrong: the permission prompt never appears, notifications never fire,
+    //! the user has to manually enable in System Settings → Notifications,
+    //! and even then click callbacks may misbehave.
+    //!
+    //! `tauri::AppHandle::run_on_main_thread` dispatches a sync closure to
+    //! the main runloop. For async user-notify methods we wrap with a
+    //! oneshot channel: spawn the future on the main thread via block_on,
+    //! send the result back, await on the calling task.
 
     use super::{FirePayload, NotificationService};
     use std::collections::HashMap;
     use std::sync::Arc;
-    use tauri::Emitter;
+    use tauri::{Emitter, Manager};
+    use tokio::sync::oneshot;
     use user_notify::{NotificationBuilder, get_notification_manager};
 
     /// Initialize the user-notify manager and register the click callback.
-    /// Stores the manager on the service so it stays alive for the app's
-    /// lifetime (and the registered delegate stays attached).
+    /// MUST run on macOS main thread (UNUserNotificationCenterDelegate setup).
     pub fn init(svc: &Arc<NotificationService>) {
         let bundle_id = svc.app.config().identifier.clone();
-        let manager = get_notification_manager(bundle_id, None);
+        let app_for_callback = svc.app.clone();
+        let svc_for_storage = svc.clone();
 
-        // The callback fires when the user clicks a banner OR a notification
-        // in Notification Center. Extract our embedded routing data from
-        // user_info and emit a frontend event the bridge already listens for.
-        let app = svc.app.clone();
-        let result = manager.register(
-            Box::new(move |response| {
-                let info = &response.user_info;
-                let project_id = info.get("project_id").cloned().unwrap_or_default();
-                let tab_id = info.get("tab_id").cloned().unwrap_or_default();
-                if project_id.is_empty() || tab_id.is_empty() {
-                    eprintln!(
-                        "[notifications] click with no routing data: {:?}",
-                        response,
+        // run_on_main_thread dispatches the closure to the macOS main runloop.
+        // The closure runs synchronously THERE; the returned Result tells us
+        // only whether the dispatch succeeded, not the closure's outcome.
+        let dispatch = svc.app.run_on_main_thread(move || {
+            let manager = get_notification_manager(bundle_id, None);
+
+            let app = app_for_callback;
+            let result = manager.register(
+                Box::new(move |response| {
+                    let info = &response.user_info;
+                    let project_id = info.get("project_id").cloned().unwrap_or_default();
+                    let tab_id = info.get("tab_id").cloned().unwrap_or_default();
+                    if project_id.is_empty() || tab_id.is_empty() {
+                        eprintln!(
+                            "[notifications] click with no routing data: {:?}",
+                            response,
+                        );
+                        return;
+                    }
+                    // Bring the window forward as well — single-instance plugin
+                    // takes care of preventing duplicate launches, but we want
+                    // the running window to surface immediately on click.
+                    if let Some(window) = app.get_webview_window("main") {
+                        let _ = window.show();
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                    let _ = app.emit(
+                        "notification:click",
+                        serde_json::json!({
+                            "project_id": project_id,
+                            "tab_id": tab_id,
+                        }),
                     );
-                    return;
-                }
-                let _ = app.emit(
-                    "notification:click",
-                    serde_json::json!({
-                        "project_id": project_id,
-                        "tab_id": tab_id,
-                    }),
-                );
-            }),
-            Vec::new(), // No interactive buttons / reply inputs in v1.
-        );
-        if let Err(e) = result {
-            eprintln!("[notifications] failed to register user-notify callback: {e}");
-            return;
+                }),
+                Vec::new(), // No interactive buttons / reply inputs in v1.
+            );
+            if let Err(e) = result {
+                eprintln!("[notifications] register on main thread failed: {e}");
+                return;
+            }
+            *svc_for_storage.manager.lock().unwrap() = Some(manager);
+            eprintln!("[notifications] release backend (user-notify) initialized on main thread");
+        });
+        if let Err(e) = dispatch {
+            eprintln!("[notifications] failed to dispatch init to main thread: {e}");
         }
-        *svc.manager.lock().unwrap() = Some(manager);
     }
 
     pub async fn fire(svc: &Arc<NotificationService>, payload: FirePayload) {
@@ -442,38 +474,68 @@ mod backend {
         user_info.insert("project_id".to_string(), payload.project_id.clone());
         user_info.insert("tab_id".to_string(), payload.tab_id_in_project.clone());
 
-        // Thread id groups + replaces successive notifications for the same
-        // tab in Notification Center — same effect as our prior identifier
-        // scheme.
         let thread_id = format!("agent-terminal:tab:{}", payload.composite_tab_id);
 
-        let builder = NotificationBuilder::new()
-            .title(&payload.title)
-            .body(&payload.body)
-            .set_thread_id(&thread_id)
-            .set_user_info(user_info);
+        let title = payload.title.clone();
+        let body = payload.body.clone();
 
-        if let Err(e) = manager.send_notification(builder).await {
-            eprintln!("[notifications] user-notify send failed: {e}");
+        // Dispatch send_notification to the main thread to be safe — Cocoa
+        // notification posting commonly requires it. Use a oneshot to ferry
+        // the Result back to our async caller.
+        let (tx, rx) = oneshot::channel();
+        let dispatch = svc.app.run_on_main_thread(move || {
+            let builder = NotificationBuilder::new()
+                .title(&title)
+                .body(&body)
+                .set_thread_id(&thread_id)
+                .set_user_info(user_info);
+            let result = tauri::async_runtime::block_on(manager.send_notification(builder));
+            let _ = tx.send(result.map(|_| ()).map_err(|e| e.to_string()));
+        });
+        if let Err(e) = dispatch {
+            eprintln!("[notifications] failed to dispatch send to main thread: {e}");
+            return;
+        }
+        match rx.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => eprintln!("[notifications] user-notify send failed: {e}"),
+            Err(_) => eprintln!("[notifications] send dispatch dropped before completion"),
         }
     }
 
     pub fn cancel(svc: &NotificationService, composite_tab_id: &str) {
         let Some(manager) = svc.manager.lock().unwrap().clone() else { return };
         let id = format!("agent-terminal:tab:{composite_tab_id}");
-        let _ = manager.remove_delivered_notifications(vec![&id]);
+        // remove_delivered_notifications is sync — dispatch to main thread.
+        let id_owned = id;
+        let _ = svc.app.run_on_main_thread(move || {
+            let _ = manager.remove_delivered_notifications(vec![&id_owned]);
+        });
     }
 
     pub async fn ensure_permission(svc: &NotificationService) -> bool {
         let Some(manager) = svc.manager.lock().unwrap().clone() else {
             return false;
         };
-        if let Ok(true) = manager.get_notification_permission_state().await {
-            return true;
+        // Both permission calls must run on main thread.
+        let (tx, rx) = oneshot::channel();
+        let manager_clone = manager.clone();
+        let dispatch = svc.app.run_on_main_thread(move || {
+            let granted = tauri::async_runtime::block_on(async move {
+                if let Ok(true) = manager_clone.get_notification_permission_state().await {
+                    return true;
+                }
+                manager_clone
+                    .first_time_ask_for_notification_permission()
+                    .await
+                    .unwrap_or(false)
+            });
+            let _ = tx.send(granted);
+        });
+        if let Err(e) = dispatch {
+            eprintln!("[notifications] failed to dispatch permission to main thread: {e}");
+            return false;
         }
-        manager
-            .first_time_ask_for_notification_permission()
-            .await
-            .unwrap_or(false)
+        rx.await.unwrap_or(false)
     }
 }
