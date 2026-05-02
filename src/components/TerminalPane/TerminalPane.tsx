@@ -104,7 +104,14 @@ export const TerminalPane = React.memo(function TerminalPane({
 
     const unlistenRespawn = onPtyRespawned((id, cwd) => {
       if (id !== tabKey) return
-      const where = cwd ? ` in ${cwd}` : ''
+      // Strip C0/C1 control bytes (incl. ESC) from the path before
+      // injecting it into the xterm stream. cwd ultimately comes from a
+      // shell-emitted OSC 7 + URL decode, which can produce literal
+      // control bytes if a directory name contains `%1B` or similar —
+      // without this scrub, opening such a folder would inject arbitrary
+      // terminal escapes through the restart banner.
+      const safe = cwd?.replace(/[\x00-\x1f\x7f-\x9f]/g, '?') ?? ''
+      const where = safe ? ` in ${safe}` : ''
       // Dim ANSI so the banner reads as system chrome, not shell output.
       handleRef.current?.write(
         `\r\n\x1b[2m[Shell restarted${where}]\x1b[0m\r\n`,

@@ -10,6 +10,18 @@ use tokio::sync::mpsc;
 /// Shared `tab_id → cwd` table, written by the engine task whenever
 /// `DirTrackerMod` parses an OSC 7 sequence and read by `pty_manager` when
 /// it needs to respawn a shell at the last known location.
+///
+/// TODO(respawn-cwd-staleness): the path from PTY read → engine task → this
+/// table is best-effort: `ModEngineHandle::on_output` uses `try_send` on a
+/// 512-bounded channel and `ctx.set_cwd` does the same. Under a heavy PTY
+/// burst, the chunk carrying the latest OSC 7 can be dropped or still
+/// queued when `pty_manager::respawn_in_place` reads the cwd, so the
+/// restarted shell may come back one `cd` behind. Mitigation would be to
+/// parse OSC 7 inline in pty_manager's reader thread and write straight
+/// into a dedicated cwd snapshot, decoupling respawn from the engine's
+/// queue. Deferred — practical impact is low (worst case = "respawn at
+/// one cd ago"), and the cleanest fix lives next to a future output-replay
+/// buffer rather than in this PR.
 pub type CwdTable = Arc<Mutex<HashMap<String, String>>>;
 
 pub(super) enum ModMessage {
@@ -172,12 +184,17 @@ impl ModEngine {
                             let shell_pid = shell_pid_table.get(&tab_id).copied().unwrap_or(0);
                             let ctx = ModContext::new(&tab_id, &event_tx_dispatch, &cwd_tx, &agent_tx, current_cwd, shell_pid);
                             for m in &mut mods { m.on_close(&ctx); }
-                            // Don't drop the cwd_table entry — pty_manager
-                            // may still want to respawn the same tab id and
-                            // restore the user's last cwd. The entry is
-                            // overwritten on the next OSC 7 anyway, and a
-                            // tab id is never reused after a real close
-                            // (frontend rolls a fresh uuid).
+                            // Drop the cwd entry too. Respawn doesn't need
+                            // it preserved here — `respawn_in_place` reads
+                            // the cwd into a local variable BEFORE issuing
+                            // its own on_tab_close, so the close message
+                            // arrives with the cwd already captured.
+                            // Keeping closed-tab entries around would leak
+                            // for the app's lifetime AND let a 4-hex
+                            // randomSuffix() collision on a brand-new tab
+                            // inherit a stale cwd until the new shell's
+                            // first OSC 7.
+                            cwd_table_task.lock().unwrap().remove(&tab_id);
                             shell_pid_table.remove(&tab_id);
                         }
                         ModMessage::Output { tab_id, data } => {

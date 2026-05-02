@@ -160,11 +160,17 @@ fn spawn_reader_thread(
                     }
 
                     // Shell exited on its own — try to respawn in place at
-                    // the last known CWD. If that fails (rate limit, handle
-                    // gone, OS error), fall through to the same exit path
-                    // as a user close.
+                    // the last known CWD. Three outcomes:
+                    //   * Respawned        → silent exit (new reader took over)
+                    //   * SkippedExternally → silent exit (try_reattach already
+                    //     reclaimed the entry and open_tab is spawning a fresh
+                    //     PTY for this tab id; emitting pty:exit here would
+                    //     clobber the new shell's state)
+                    //   * Err              → fall through to the user-close path
+                    //     (rate limit hit, OS error, etc.)
                     match respawn_in_place(&ctx) {
-                        Ok(()) => break,
+                        Ok(RespawnOutcome::Respawned)
+                        | Ok(RespawnOutcome::SkippedExternally) => break,
                         Err(e) => {
                             eprintln!(
                                 "[pty_manager] respawn failed for {}: {e}",
@@ -211,15 +217,30 @@ fn spawn_reader_thread(
     });
 }
 
+/// What `respawn_in_place` did, so the reader thread knows whether to stay
+/// silent or fall through to the user-close exit path.
+enum RespawnOutcome {
+    /// Replaced the handle's master/writer/child and started a new reader.
+    Respawned,
+    /// PtyMap entry was already gone — `try_reattach` reclaimed it and
+    /// `open_tab` is spawning a fresh PTY for the same tab id. Emitting
+    /// `pty:exit` from here would clobber that new shell's state.
+    SkippedExternally,
+}
+
 /// Replaces the master/writer/child of an existing PtyHandle with a freshly
 /// spawned shell at the last-known CWD, and starts a new reader thread.
 ///
 /// The handle's tab_id, channel, and PtyMap entry stay the same — frontend
 /// keeps writing to the same xterm instance and never sees a tab swap.
-fn respawn_in_place(ctx: &ReaderCtx) -> Result<(), String> {
+fn respawn_in_place(ctx: &ReaderCtx) -> Result<RespawnOutcome, String> {
     let mut map = ctx.pty_map.lock().unwrap();
     let Some(handle) = map.get_mut(&ctx.tab_id) else {
-        return Err("PtyMap entry vanished before respawn".to_string());
+        // Race with try_reattach: it called `child.try_wait()`, saw the
+        // dead child, removed the entry, and `open_tab` is now spawning a
+        // fresh PTY for this tab id. Stay silent — the new spawn owns the
+        // tab now.
+        return Ok(RespawnOutcome::SkippedExternally);
     };
 
     // Rate limit: if too many respawns happened recently, surface as a
@@ -247,9 +268,19 @@ fn respawn_in_place(ctx: &ReaderCtx) -> Result<(), String> {
         .or_else(|| handle.spawn_cwd.clone())
         .or_else(|| dirs::home_dir().and_then(|p| p.to_str().map(String::from)));
 
+    // Carry the current PTY size across so full-screen apps in the new
+    // shell render correctly. Without this the replacement starts at the
+    // 80x24 default and stays there until the user manually resizes the
+    // pane (xterm doesn't fire a resize when its container size hasn't
+    // changed).
+    let size = handle
+        .master
+        .get_size()
+        .unwrap_or(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 });
+
     let pty_system = native_pty_system();
     let pair = pty_system
-        .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+        .openpty(size)
         .map_err(|e| e.to_string())?;
 
     let cmd = build_shell_command(&handle.shell_path, cwd.as_deref(), &ctx.tab_id);
@@ -298,7 +329,7 @@ fn respawn_in_place(ctx: &ReaderCtx) -> Result<(), String> {
         },
     ).ok();
 
-    Ok(())
+    Ok(RespawnOutcome::Respawned)
 }
 
 pub fn try_reattach(
