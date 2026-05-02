@@ -124,12 +124,30 @@ fn start_collector(listener: TcpListener) -> CollectorServer {
 /// Pipes `payload` to `script event` via stdin and waits for the child to exit.
 /// Returns the elapsed wall-clock time.
 fn run_hook(script: &PathBuf, event: &str, payload: &str) -> Duration {
+    run_hook_with_env(script, event, payload, &[], &[])
+}
+
+/// Runs the hook script with explicit env-var additions and removals.
+fn run_hook_with_env(
+    script: &PathBuf,
+    event: &str,
+    payload: &str,
+    env_overrides: &[(&str, &str)],
+    env_removes: &[&str],
+) -> Duration {
     let start = Instant::now();
-    let mut child = Command::new(script)
-        .arg(event)
+    let mut cmd = Command::new(script);
+    cmd.arg(event)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    for (k, v) in env_overrides {
+        cmd.env(k, v);
+    }
+    for k in env_removes {
+        cmd.env_remove(k);
+    }
+    let mut child = cmd
         .spawn()
         .unwrap_or_else(|e| panic!("failed to spawn {}: {e}", script.display()));
 
@@ -146,10 +164,26 @@ fn run_hook(script: &PathBuf, event: &str, payload: &str) -> Duration {
 
 /// Polls the received queue until a payload arrives or the timeout expires.
 async fn wait_for_payload(received: &Received) -> Option<Value> {
+    wait_for_payload_matching(received, |_| true).await
+}
+
+/// Polls the received queue and returns the first payload satisfying `pred`.
+/// Skips and discards earlier payloads that don't match — needed because i7's
+/// fire-and-forget curl can still be in-flight when the next test binds the
+/// port, and its delayed POST then lands in the next test's queue.
+async fn wait_for_payload_matching<F>(received: &Received, pred: F) -> Option<Value>
+where
+    F: Fn(&Value) -> bool,
+{
     timeout(Duration::from_secs(3), async {
         loop {
-            if let Some(p) = received.lock().unwrap().pop_front() {
-                return p;
+            {
+                let mut q = received.lock().unwrap();
+                while let Some(p) = q.pop_front() {
+                    if pred(&p) {
+                        return p;
+                    }
+                }
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
@@ -461,6 +495,138 @@ async fn i6_real_codex_hooks_no_duplicates() {
             "duplicate agent-terminal entry in {event}: {our_cmds:?}"
         );
     }
+}
+
+// ─── I9: tab_id forwarded when AGENT_TERMINAL_TAB_ID is set ──────────────────
+
+/// Confirms the script forwards `$AGENT_TERMINAL_TAB_ID` as a `tab_id` field.
+#[tokio::test]
+async fn i9_claude_hook_forwards_tab_id_when_env_set() {
+    let _g = acquire_port_lock();
+
+    let script = claude_hook();
+    if !script.exists() {
+        eprintln!("SKIP i9: claude-hook not installed");
+        return;
+    }
+    let Some(listener) = try_bind_hook_port().await else {
+        eprintln!("SKIP i9: port 47384 busy");
+        return;
+    };
+    let server = start_collector(listener);
+
+    let payload = r#"{"session_id":"test-session-i9","cwd":"/tmp/i9-project"}"#;
+    run_hook_with_env(
+        &script,
+        "SessionStart",
+        payload,
+        &[("AGENT_TERMINAL_TAB_ID", "proj-A:tab-42")],
+        &[],
+    );
+
+    let got = wait_for_payload_matching(&server.received, |p| {
+        p["session_id"] == "test-session-i9"
+    })
+    .await
+    .expect("no payload received within 3s");
+
+    assert_eq!(got["agent"], "claude-code");
+    assert_eq!(got["event"], "SessionStart");
+    assert_eq!(
+        got["tab_id"], "proj-A:tab-42",
+        "tab_id must be forwarded from $AGENT_TERMINAL_TAB_ID"
+    );
+    assert_eq!(got["cwd"], "/tmp/i9-project");
+}
+
+// ─── I10: tab_id field omitted when env var is unset ─────────────────────────
+
+/// Confirms the script omits `tab_id` when `$AGENT_TERMINAL_TAB_ID` is unset.
+#[tokio::test]
+async fn i10_claude_hook_omits_tab_id_when_env_unset() {
+    let _g = acquire_port_lock();
+
+    let script = claude_hook();
+    if !script.exists() {
+        eprintln!("SKIP i10: claude-hook not installed");
+        return;
+    }
+    let Some(listener) = try_bind_hook_port().await else {
+        eprintln!("SKIP i10: port 47384 busy");
+        return;
+    };
+    let server = start_collector(listener);
+
+    let payload = r#"{"session_id":"test-session-i10","cwd":"/tmp/i10-project"}"#;
+    // env_remove, not env("", "") — the calling cargo-test process may run
+    // inside agent-terminal and an empty-string override would still let the
+    // parent's value leak through; also future-proofs against any guard
+    // change that distinguishes set-empty from unset.
+    run_hook_with_env(
+        &script,
+        "SessionStart",
+        payload,
+        &[],
+        &["AGENT_TERMINAL_TAB_ID"],
+    );
+
+    let got = wait_for_payload_matching(&server.received, |p| {
+        p["session_id"] == "test-session-i10"
+    })
+    .await
+    .expect("no payload received within 3s");
+
+    assert_eq!(got["agent"], "claude-code");
+    assert_eq!(got["event"], "SessionStart");
+    assert!(
+        got.get("tab_id").is_none(),
+        "tab_id must be omitted when AGENT_TERMINAL_TAB_ID is unset, got: {got:?}"
+    );
+}
+
+// ─── I11: tab_id field omitted when env value contains unsafe chars ──────────
+
+/// Unsafe characters in `$AGENT_TERMINAL_TAB_ID` must omit the field, not corrupt the JSON.
+#[tokio::test]
+async fn i11_claude_hook_omits_tab_id_when_value_unsafe() {
+    let _g = acquire_port_lock();
+
+    let script = claude_hook();
+    if !script.exists() {
+        eprintln!("SKIP i11: claude-hook not installed");
+        return;
+    }
+    let Some(listener) = try_bind_hook_port().await else {
+        eprintln!("SKIP i11: port 47384 busy");
+        return;
+    };
+    let server = start_collector(listener);
+
+    let payload = r#"{"session_id":"test-session-i11","cwd":"/tmp/i11-project"}"#;
+    // Embedded `"` would close the JSON string early and inject extra
+    // fields if the script didn't validate the env value.
+    run_hook_with_env(
+        &script,
+        "SessionStart",
+        payload,
+        &[("AGENT_TERMINAL_TAB_ID", "evil\",\"injected\":\"true")],
+        &[],
+    );
+
+    let got = wait_for_payload_matching(&server.received, |p| {
+        p["session_id"] == "test-session-i11"
+    })
+    .await
+    .expect("no payload received within 3s");
+
+    assert!(
+        got.get("tab_id").is_none(),
+        "tab_id must be omitted when the env value contains unsafe chars, got: {got:?}"
+    );
+    assert!(
+        got.get("injected").is_none(),
+        "no injected field should appear in the payload"
+    );
 }
 
 // ─── E2E (guided / interactive) helpers ──────────────────────────────────────

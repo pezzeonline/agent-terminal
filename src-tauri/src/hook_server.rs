@@ -15,8 +15,8 @@ use tokio::sync::mpsc;
 
 /// Payload delivered by agent hook scripts to `POST /hook`.
 ///
-/// The `agent` and `event` fields are injected by the hook script. All other
-/// fields are passed through as-is from the agent's own stdin JSON.
+/// The `agent`, `event`, and `tab_id` fields are injected by the hook script.
+/// All other fields are passed through as-is from the agent's own stdin JSON.
 #[derive(Deserialize, Clone, Debug)]
 pub struct HookPayload {
     /// Which agent sent the event: `"claude-code"` or `"codex"`.
@@ -25,6 +25,13 @@ pub struct HookPayload {
     /// `"PreToolUse"`, `"Notification"`, `"Stop"`, `"SessionEnd"`.
     /// Codex: same first three, plus `"PermissionRequest"`, `"PostToolUse"`, `"Stop"`.
     pub event: String,
+    /// Tab id of the agent-terminal tab the shell is running inside.
+    /// Carried via the `AGENT_TERMINAL_TAB_ID` env var, which `pty_manager`
+    /// injects into every shell it spawns. `None` when the agent is running
+    /// outside agent-terminal (iTerm, Terminal.app, etc.) — in that case
+    /// `AgentTurnMod` drops the event at its top-of-handler gate. See
+    /// `hook_config::build_hook_script` for the script-side half.
+    pub tab_id: Option<String>,
     pub session_id: Option<String>,
     pub cwd: Option<String>,
     pub tool_name: Option<String>,

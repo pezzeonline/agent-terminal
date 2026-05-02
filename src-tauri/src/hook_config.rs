@@ -170,11 +170,20 @@ pub(crate) async fn write_hook_script_to(
 
 /// Generates the hook shell script content for `agent_id`.
 ///
-/// The script reads the agent's JSON payload from stdin, prepends `agent` and
-/// `event` fields, and fires a curl POST to the hook server in a detached
-/// background subshell. The script exits in milliseconds regardless of what
-/// curl does — Claude Code (and any other agent) is never blocked waiting on
-/// the hook server.
+/// The script reads the agent's JSON payload from stdin, prepends `agent`,
+/// `event`, and (when set) `tab_id` fields, then fires a curl POST to the
+/// hook server in a detached background subshell. The script exits in
+/// milliseconds regardless of what curl does — Claude Code (and any other
+/// agent) is never blocked waiting on the hook server.
+///
+/// `tab_id` comes from `$AGENT_TERMINAL_TAB_ID`, which `pty_manager` injects
+/// into every shell it spawns. When the agent is running OUTSIDE
+/// agent-terminal (iTerm, Terminal.app, etc.), the env var is unset and the
+/// `tab_id` field is omitted entirely. Server-side that becomes
+/// `HookPayload::tab_id == None` and `AgentTurnMod` drops the event. This is
+/// the load-bearing piece of the cross-terminal-noise fix — without it, the
+/// only correlation signal was CWD prefix matching, which can't distinguish
+/// two terminals at the same path.
 ///
 /// Why detach instead of `--connect-timeout`/`--max-time`: ECONNREFUSED is
 /// instant on macOS, so a missing server doesn't hang. The hang we hit in
@@ -195,7 +204,7 @@ pub(crate) async fn write_hook_script_to(
 fn build_hook_script(agent_id: &str) -> String {
     // The sed command removes the leading `{` from the agent's JSON payload so
     // we can inject our own fields at the front. The result is a valid JSON object:
-    //   {"agent":"claude-code","event":"UserPromptSubmit","session_id":"...","cwd":"..."}
+    //   {"agent":"claude-code","event":"UserPromptSubmit","tab_id":"…","session_id":"…","cwd":"…"}
     //
     // CRITICAL: the inner echo uses bare "$INPUT" (shell-quoted), NOT \"$INPUT\".
     // The backslash-quote form prints LITERAL quote characters around the value,
@@ -203,6 +212,21 @@ fn build_hook_script(agent_id: &str) -> String {
     // That bug shipped originally and silently broke every hook delivery —
     // serde rejected the bad JSON, ps-fallback kept the UI working, nobody
     // noticed until the integration tests caught it.
+    //
+    // TAB_FIELD is built BEFORE PAYLOAD so the `tab_id` field is omitted
+    // entirely when AGENT_TERMINAL_TAB_ID is unset. Inserting an empty string
+    // would produce a `"tab_id":""` field; the server's gate explicitly
+    // rejects empty strings too, but emitting nothing is cleaner.
+    //
+    // Defense-in-depth: the env value is validated against a strict charset
+    // before going into the JSON. Today, tab ids are composite frontend
+    // identifiers (`<projectId>:<tabId>`) — never user-controllable — so a
+    // hostile value can't actually arrive. But the script interpolates the
+    // value raw into a JSON string, which would corrupt the payload (or
+    // inject extra fields) if a `"`, `\`, or newline ever slipped through.
+    // The case statement omits the field on any unexpected character, so a
+    // future change to the tab-id format that introduces unsafe chars
+    // degrades to "no correlation" rather than "malformed POST".
     format!(
         "#!/bin/sh\n\
 # Written by Agent Terminal. Do not edit — regenerated on each launch.\n\
@@ -210,7 +234,12 @@ fn build_hook_script(agent_id: &str) -> String {
 INPUT=$(cat)\n\
 EVENT=\"$1\"\n\
 STRIPPED=$(printf '%s' \"$INPUT\" | sed 's/^{{//')\n\
-PAYLOAD=\"{{\\\"agent\\\":\\\"{agent_id}\\\",\\\"event\\\":\\\"$EVENT\\\",$STRIPPED\"\n\
+case \"$AGENT_TERMINAL_TAB_ID\" in\n\
+  '') TAB_FIELD=\"\" ;;\n\
+  *[!A-Za-z0-9:_-]*) TAB_FIELD=\"\" ;;\n\
+  *) TAB_FIELD=\"\\\"tab_id\\\":\\\"$AGENT_TERMINAL_TAB_ID\\\",\" ;;\n\
+esac\n\
+PAYLOAD=\"{{\\\"agent\\\":\\\"{agent_id}\\\",\\\"event\\\":\\\"$EVENT\\\",${{TAB_FIELD}}$STRIPPED\"\n\
 {{ curl -sf --max-time 5 -X POST http://127.0.0.1:47384/hook \\\n\
     -H 'Content-Type: application/json' \\\n\
     -d \"$PAYLOAD\" \\\n\
@@ -843,5 +872,33 @@ mod tests {
         // the server's bind. See doc comment on `build_hook_script`.
         assert!(content.contains("127.0.0.1:47384"), "script should be updated");
         assert!(!content.contains("echo old"), "old content should be replaced");
+    }
+
+    // ── S4: script forwards AGENT_TERMINAL_TAB_ID into payload ───────────────
+    /// The cross-terminal-noise fix lives in two halves: pty_manager injects
+    /// `AGENT_TERMINAL_TAB_ID` into every spawned shell, and this script
+    /// forwards it as a `tab_id` field in the POST body. If either half
+    /// regresses, hooks from sessions outside agent-terminal start firing
+    /// notifications again.
+    #[tokio::test]
+    async fn s4_script_forwards_tab_id_env_var() {
+        let dir = temp_dir("s4");
+        let script = dir.join("claude-hook");
+
+        write_hook_script_to(claude_config(), &script).await.unwrap();
+        let content = fs::read_to_string(&script).unwrap();
+
+        // The env var name must appear in the script — without it, no
+        // correlation signal reaches the server.
+        assert!(
+            content.contains("$AGENT_TERMINAL_TAB_ID"),
+            "script must reference $AGENT_TERMINAL_TAB_ID"
+        );
+        // The `tab_id` JSON key must also appear — proves we're emitting it
+        // into the payload, not just reading the env for some other purpose.
+        assert!(
+            content.contains("\\\"tab_id\\\":"),
+            "script must emit a tab_id JSON field"
+        );
     }
 }
