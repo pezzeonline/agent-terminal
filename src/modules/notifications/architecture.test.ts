@@ -67,30 +67,35 @@ function stripComments(src: string): string {
   return out
 }
 
+type Violation = { file: string; pattern: string; sample: string }
+
+function violationsInFile(file: string): Violation[] {
+  const raw = readFileSync(file, 'utf8')
+  const code = stripComments(raw)
+  const lines = code.split('\n')
+  const out: Violation[] = []
+  for (const pattern of FORBIDDEN) {
+    const match = code.match(pattern)
+    if (!match) continue
+    // Find the line for a more useful error — search in the
+    // comments-stripped form so the lint points at runtime code.
+    const lineIdx = lines.findIndex((l) => pattern.test(l))
+    const sample = lineIdx >= 0 ? (lines[lineIdx] ?? '').trim() : match[0]
+    out.push({
+      file: file.replace(NOTIFICATIONS_DIR, '<notifications>'),
+      pattern: String(pattern),
+      sample,
+    })
+  }
+  return out
+}
+
 describe('notifications module — agent-agnosticism guard', () => {
   test('no runtime source file mentions specific agent IDs or lookup tables', () => {
     const files = listSourceFiles(NOTIFICATIONS_DIR)
     expect(files.length).toBeGreaterThan(0) // sanity
 
-    const violations: Array<{ file: string; pattern: string; sample: string }> = []
-    for (const file of files) {
-      const raw = readFileSync(file, 'utf8')
-      const code = stripComments(raw)
-      for (const pattern of FORBIDDEN) {
-        const match = code.match(pattern)
-        if (!match) continue
-        // Find the line for a more useful error — search in the
-        // comments-stripped form so the lint points at runtime code.
-        const lines = code.split('\n')
-        const lineIdx = lines.findIndex((l) => pattern.test(l))
-        const sample = lineIdx >= 0 ? lines[lineIdx]!.trim() : match[0]
-        violations.push({
-          file: file.replace(NOTIFICATIONS_DIR, '<notifications>'),
-          pattern: String(pattern),
-          sample,
-        })
-      }
-    }
+    const violations = files.flatMap(violationsInFile)
 
     if (violations.length > 0) {
       const report = violations

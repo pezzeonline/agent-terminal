@@ -5,6 +5,7 @@ import {
 } from '@/components/XTermTerminal/XTermTerminal'
 import { IPC } from '@/modules/ipc/commands'
 import { onPtyExit, onPtyRespawned } from '@/modules/ipc/events'
+import { $activeTerminalHandle } from '@/modules/stores/$activeTerminal'
 import { makeTabKey } from '@/screens/workspace/workspace.helpers'
 
 // Tracks in-flight openTab calls per tabKey. Prevents concurrent calls
@@ -43,6 +44,27 @@ export const TerminalPane = React.memo(function TerminalPane({
     }
   }, [isActive])
 
+  // Register this terminal as the active one whenever its tab is visible.
+  // Global hotkeys (Cmd+K, Cmd+A, Cmd+F, Cmd+G) read from the registry to
+  // dispatch terminal-scoped actions. Race-safe clear: only nil out the
+  // slot if it still points at us.
+  //
+  // The matching set call inside `handleReady` (below) covers the case
+  // where the pane mounts already-active and the handle isn't ready yet
+  // when this effect first runs. Without that, first-launch left the
+  // registry stuck at null until the user switched tabs.
+  useEffect(() => {
+    if (!isActive) return
+    if (handleRef.current) {
+      $activeTerminalHandle.set(handleRef.current)
+    }
+    return () => {
+      if ($activeTerminalHandle.get() === handleRef.current) {
+        $activeTerminalHandle.set(null)
+      }
+    }
+  }, [isActive])
+
   // Called once when the xterm canvas is ready.
   //
   // Pty lifecycle is owned by the store, not this component:
@@ -58,6 +80,12 @@ export const TerminalPane = React.memo(function TerminalPane({
   const handleReady = useCallback(
     (handle: XTermHandle) => {
       handleRef.current = handle
+      // If this pane mounted already-active, the registration effect above
+      // ran before the handle existed. Catch up now so global hotkeys
+      // work on first launch without requiring a tab switch.
+      if (isActive) {
+        $activeTerminalHandle.set(handle)
+      }
 
       if (pendingOpens.has(tabKey)) return
       pendingOpens.add(tabKey)
@@ -75,7 +103,7 @@ export const TerminalPane = React.memo(function TerminalPane({
           pendingOpens.delete(tabKey)
         })
     },
-    [tabKey, cwd],
+    [tabKey, cwd, isActive],
   )
 
   const handleData = useCallback(
@@ -104,13 +132,13 @@ export const TerminalPane = React.memo(function TerminalPane({
 
     const unlistenRespawn = onPtyRespawned((id, cwd) => {
       if (id !== tabKey) return
-      // Strip C0/C1 control bytes (incl. ESC) from the path before
-      // injecting it into the xterm stream. cwd ultimately comes from a
-      // shell-emitted OSC 7 + URL decode, which can produce literal
-      // control bytes if a directory name contains `%1B` or similar —
-      // without this scrub, opening such a folder would inject arbitrary
-      // terminal escapes through the restart banner.
-      const safe = cwd?.replace(/[\x00-\x1f\x7f-\x9f]/g, '?') ?? ''
+      // Strip Unicode control characters (Cc category — covers C0/C1) from
+      // the path before injecting it into the xterm stream. cwd ultimately
+      // comes from a shell-emitted OSC 7 + URL decode, which can produce
+      // literal control bytes if a directory name contains `%1B` or
+      // similar — without this scrub, opening such a folder would inject
+      // arbitrary terminal escapes through the restart banner.
+      const safe = cwd?.replace(/\p{Cc}/gu, '?') ?? ''
       const where = safe ? ` in ${safe}` : ''
       // Dim ANSI so the banner reads as system chrome, not shell output.
       handleRef.current?.write(
