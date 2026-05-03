@@ -200,6 +200,29 @@ export function renameTab(
   persist(updated)
 }
 
+/**
+ * Restores a tab's label from the closed-tab history. Same persistence
+ * as `renameTab` but does NOT flag `userRenamed` — reopen is replaying
+ * whatever the tab had at close time (often an auto-generated dedupe
+ * label), not an explicit user action.
+ */
+export function restoreTabLabel(
+  projectId: string,
+  tabId: string,
+  label: string,
+): void {
+  const updated = $projects.get().map((p) =>
+    p.id !== projectId
+      ? p
+      : {
+          ...p,
+          tabs: p.tabs.map((t) => (t.id !== tabId ? t : { ...t, label })),
+        },
+  )
+  $projects.set(updated)
+  persist(updated)
+}
+
 export function updateTabCwd(tabKey: string, cwd: string): void {
   const [projectId, tabId] = tabKey.split(':')
   if (!projectId || !tabId) return

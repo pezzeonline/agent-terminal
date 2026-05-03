@@ -16,8 +16,15 @@ export type XTermHandle = {
   clear: () => void
   /** Selects all text in the buffer. */
   selectAll: () => void
-  /** Jumps to the next match for the current `$activeSearch` query. */
-  searchNext: () => void
+  /**
+   * Jumps to the next match for the current `$activeSearch` query.
+   * Pass `incremental: true` from typing-driven calls so the highlight
+   * stays on the current match while it still matches the growing query
+   * (xterm's addon-search expands the existing selection rather than
+   * advancing past it). Default `false` matches the explicit Cmd+G
+   * "next match" semantic.
+   */
+  searchNext: (opts?: { incremental?: boolean }) => void
   /** Jumps to the previous match for the current `$activeSearch` query. */
   searchPrevious: () => void
 }
@@ -242,13 +249,14 @@ export const XTermTerminal = React.memo(function XTermTerminal({
       focus: () => termRef.current?.focus(),
       clear: () => termRef.current?.clear(),
       selectAll: () => termRef.current?.selectAll(),
-      searchNext: () => {
+      searchNext: (opts) => {
         const s = $activeSearch.get()
         if (!s?.query) return
         searchAddonRef.current?.findNext(s.query, {
           caseSensitive: s.matchCase,
           wholeWord: s.wholeWord,
           regex: s.regex,
+          incremental: opts?.incremental ?? false,
         })
       },
       searchPrevious: () => {

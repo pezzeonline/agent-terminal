@@ -4,6 +4,7 @@ import { useHotkeys } from 'react-hotkeys-hook'
 import { Sidebar } from '@/components/Sidebar/Sidebar'
 import { StatusBar } from '@/components/StatusBar/StatusBar'
 import { TerminalSearchBar } from '@/components/TerminalSearchBar/TerminalSearchBar'
+import { Keys, Mod } from '@/modules/keymap/keys'
 import { $activeSearch, openSearch } from '@/modules/stores/$activeSearch'
 import { $activeTerminalHandle } from '@/modules/stores/$activeTerminal'
 import { popClosedTab } from '@/modules/stores/$closedTabs'
@@ -20,8 +21,12 @@ import {
   navigateToTab,
   onTabRemoved,
 } from '@/modules/stores/$navigation'
-import { Keys, Mod } from '@/modules/keymap/keys'
-import { $projects, addTab, removeTab } from '@/modules/stores/$projects'
+import {
+  $projects,
+  addTab,
+  removeTab,
+  restoreTabLabel,
+} from '@/modules/stores/$projects'
 import { WorkspaceView } from '@/screens/workspace/WorkspaceView'
 
 /* ---------------------------------------------------------------------------
@@ -116,7 +121,10 @@ export function WorkspaceLayout() {
   // VS Code, Chrome). Safe to keep on Ctrl because `Ctrl+Tab` has no
   // readline binding — `Tab` itself is shell-bound but `Ctrl+Tab` isn't.
   useHotkeys(
-    [`${Mod.Meta}+${Mod.Shift}+${Keys.BracketRight}`, `${Mod.Ctrl}+${Keys.Tab}`],
+    [
+      `${Mod.Meta}+${Mod.Shift}+${Keys.BracketRight}`,
+      `${Mod.Ctrl}+${Keys.Tab}`,
+    ],
     () => {
       const projectId = $activeProjectId.get()
       const project = $projects.get().find((p) => p.id === projectId)
@@ -131,7 +139,10 @@ export function WorkspaceLayout() {
 
   // ⌘⇧[ / Ctrl+Shift+Tab — previous tab. Symmetric with next-tab above.
   useHotkeys(
-    [`${Mod.Meta}+${Mod.Shift}+${Keys.BracketLeft}`, `${Mod.Ctrl}+${Mod.Shift}+${Keys.Tab}`],
+    [
+      `${Mod.Meta}+${Mod.Shift}+${Keys.BracketLeft}`,
+      `${Mod.Ctrl}+${Mod.Shift}+${Keys.Tab}`,
+    ],
     () => {
       const projectId = $activeProjectId.get()
       const project = $projects.get().find((p) => p.id === projectId)
@@ -212,18 +223,11 @@ export function WorkspaceLayout() {
       if (!project) return // project itself was deleted; drop silently
       const newTab = addTab(closed.projectId, closed.cwd)
       if (!newTab) return
-      // addTab generates a fresh dedupe-safe label; restore the original.
-      const updated = $projects.get().map((p) =>
-        p.id !== closed.projectId
-          ? p
-          : {
-              ...p,
-              tabs: p.tabs.map((t) =>
-                t.id === newTab.id ? { ...t, label: closed.label } : t,
-              ),
-            },
-      )
-      $projects.set(updated)
+      // addTab generates a fresh dedupe-safe label; restore the original
+      // via restoreTabLabel so the change persists across app restart.
+      // restoreTabLabel (vs renameTab) avoids setting userRenamed since
+      // we're replaying the tab's prior label, not making a user edit.
+      restoreTabLabel(closed.projectId, newTab.id, closed.label)
       navigateToTab(closed.projectId, newTab.id)
     },
     hotkeyOpts,

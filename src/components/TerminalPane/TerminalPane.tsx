@@ -48,9 +48,16 @@ export const TerminalPane = React.memo(function TerminalPane({
   // Global hotkeys (Cmd+K, Cmd+A, Cmd+F, Cmd+G) read from the registry to
   // dispatch terminal-scoped actions. Race-safe clear: only nil out the
   // slot if it still points at us.
+  //
+  // The matching set call inside `handleReady` (below) covers the case
+  // where the pane mounts already-active and the handle isn't ready yet
+  // when this effect first runs. Without that, first-launch left the
+  // registry stuck at null until the user switched tabs.
   useEffect(() => {
     if (!isActive) return
-    $activeTerminalHandle.set(handleRef.current)
+    if (handleRef.current) {
+      $activeTerminalHandle.set(handleRef.current)
+    }
     return () => {
       if ($activeTerminalHandle.get() === handleRef.current) {
         $activeTerminalHandle.set(null)
@@ -73,6 +80,12 @@ export const TerminalPane = React.memo(function TerminalPane({
   const handleReady = useCallback(
     (handle: XTermHandle) => {
       handleRef.current = handle
+      // If this pane mounted already-active, the registration effect above
+      // ran before the handle existed. Catch up now so global hotkeys
+      // work on first launch without requiring a tab switch.
+      if (isActive) {
+        $activeTerminalHandle.set(handle)
+      }
 
       if (pendingOpens.has(tabKey)) return
       pendingOpens.add(tabKey)
@@ -90,7 +103,7 @@ export const TerminalPane = React.memo(function TerminalPane({
           pendingOpens.delete(tabKey)
         })
     },
-    [tabKey, cwd],
+    [tabKey, cwd, isActive],
   )
 
   const handleData = useCallback(

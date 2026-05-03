@@ -44,8 +44,11 @@ export function TerminalSearchBar() {
         value={search.query}
         onChange={(e) => {
           setSearchQuery(e.target.value)
-          // Live-search: jump to first match as the user types.
-          $activeTerminalHandle.get()?.searchNext()
+          // Live-search: incremental:true makes the addon expand the
+          // existing selection while the growing query still matches it,
+          // so the highlight stays anchored to the current match instead
+          // of bouncing forward through the buffer on every keystroke.
+          $activeTerminalHandle.get()?.searchNext({ incremental: true })
         }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
@@ -62,6 +65,7 @@ export function TerminalSearchBar() {
         onClick={() => $activeTerminalHandle.get()?.searchPrevious()}
         className="rounded px-1 text-xs hover:bg-accent"
         title="Previous (⇧⏎)"
+        aria-label="Previous match"
       >
         ↑
       </button>
@@ -70,6 +74,7 @@ export function TerminalSearchBar() {
         onClick={() => $activeTerminalHandle.get()?.searchNext()}
         className="rounded px-1 text-xs hover:bg-accent"
         title="Next (⏎)"
+        aria-label="Next match"
       >
         ↓
       </button>
@@ -81,6 +86,7 @@ export function TerminalSearchBar() {
         }}
         className="rounded px-1 text-xs hover:bg-accent"
         title="Close (Esc)"
+        aria-label="Close find"
       >
         ✕
       </button>
