@@ -1,6 +1,7 @@
 import { useStore } from '@nanostores/react'
 import { useEffect, useRef } from 'react'
 import { useHotkeys } from 'react-hotkeys-hook'
+import { Keys } from '@/modules/keymap/keys'
 import {
   $activeSearch,
   closeSearch,
@@ -25,7 +26,7 @@ export function TerminalSearchBar() {
   }, [tabKey])
 
   useHotkeys(
-    'esc',
+    Keys.Escape,
     () => {
       if (!search) return
       closeSearch()

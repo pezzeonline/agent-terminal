@@ -20,6 +20,7 @@ import {
   navigateToTab,
   onTabRemoved,
 } from '@/modules/stores/$navigation'
+import { Keys } from '@/modules/keymap/keys'
 import { $projects, addTab, removeTab } from '@/modules/stores/$projects'
 import { WorkspaceView } from '@/screens/workspace/WorkspaceView'
 
@@ -85,7 +86,7 @@ export function WorkspaceLayout() {
 
   // ⌘T — new tab in the active project
   useHotkeys(
-    'meta+t',
+    `meta+${Keys.T}`,
     () => {
       const projectId = $activeProjectId.get()
       const newTab = addTab(projectId)
@@ -96,7 +97,7 @@ export function WorkspaceLayout() {
 
   // ⌘W — close the active tab (pinned tabs are protected)
   useHotkeys(
-    'meta+w',
+    `meta+${Keys.W}`,
     () => {
       const projectId = $activeProjectId.get()
       const tabId = $activeTabId.get()[projectId] ?? ''
@@ -115,7 +116,7 @@ export function WorkspaceLayout() {
   // VS Code, Chrome). Safe to keep on Ctrl because `Ctrl+Tab` has no
   // readline binding — `Tab` itself is shell-bound but `Ctrl+Tab` isn't.
   useHotkeys(
-    ['meta+shift+]', 'ctrl+tab'],
+    [`meta+shift+${Keys.BracketRight}`, `ctrl+${Keys.Tab}`],
     () => {
       const projectId = $activeProjectId.get()
       const project = $projects.get().find((p) => p.id === projectId)
@@ -128,9 +129,9 @@ export function WorkspaceLayout() {
     hotkeyOpts,
   )
 
-  // ⌘⇧[ / Ctrl+Shift+Tab — previous tab. Same dual-binding rationale as above.
+  // ⌘⇧[ / Ctrl+Shift+Tab — previous tab. Symmetric with next-tab above.
   useHotkeys(
-    ['meta+shift+[', 'ctrl+shift+tab'],
+    [`meta+shift+${Keys.BracketLeft}`, `ctrl+shift+${Keys.Tab}`],
     () => {
       const projectId = $activeProjectId.get()
       const project = $projects.get().find((p) => p.id === projectId)
@@ -150,15 +151,15 @@ export function WorkspaceLayout() {
   // is via Cmd+Shift+]/[ cycling. Projects beyond 9 have no shortcut.
   useHotkeys(
     [
-      'meta+1',
-      'meta+2',
-      'meta+3',
-      'meta+4',
-      'meta+5',
-      'meta+6',
-      'meta+7',
-      'meta+8',
-      'meta+9',
+      `meta+${Keys.Digit1}`,
+      `meta+${Keys.Digit2}`,
+      `meta+${Keys.Digit3}`,
+      `meta+${Keys.Digit4}`,
+      `meta+${Keys.Digit5}`,
+      `meta+${Keys.Digit6}`,
+      `meta+${Keys.Digit7}`,
+      `meta+${Keys.Digit8}`,
+      `meta+${Keys.Digit9}`,
     ],
     (e) => {
       const n = Number.parseInt(e.key, 10) - 1
@@ -173,28 +174,37 @@ export function WorkspaceLayout() {
     hotkeyOpts,
   )
 
-  // ⌘= / ⌘+ — increase font size. Bind both because on US keyboards `⌘+`
-  // requires Shift+`=`, so depending on layout the browser fires either
-  // event. iTerm2/Ghostty bind both for the same reason.
-  useHotkeys(['meta+=', 'meta+plus'], () => increaseFontSize(), hotkeyOpts)
+  // ⌘= / ⌘+ — increase font size. Bound twice: bare `Equal` for ⌘= and
+  // shifted `Equal` for ⌘+ (which is Shift+= on US keyboards). Both
+  // presses use the same physical key (event.code "Equal") and only
+  // differ by the shift modifier.
+  useHotkeys(
+    [`meta+${Keys.Equal}`, `meta+shift+${Keys.Equal}`],
+    () => increaseFontSize(),
+    hotkeyOpts,
+  )
   // ⌘- — decrease font size
-  useHotkeys('meta+-', () => decreaseFontSize(), hotkeyOpts)
+  useHotkeys(`meta+${Keys.Minus}`, () => decreaseFontSize(), hotkeyOpts)
   // ⌘0 — reset font size to default
-  useHotkeys('meta+0', () => resetFontSize(), hotkeyOpts)
+  useHotkeys(`meta+${Keys.Digit0}`, () => resetFontSize(), hotkeyOpts)
 
   // ⌘K — clear screen + scrollback in the active terminal
-  useHotkeys('meta+k', () => $activeTerminalHandle.get()?.clear(), hotkeyOpts)
+  useHotkeys(
+    `meta+${Keys.K}`,
+    () => $activeTerminalHandle.get()?.clear(),
+    hotkeyOpts,
+  )
 
   // ⌘A — select all in the active terminal
   useHotkeys(
-    'meta+a',
+    `meta+${Keys.A}`,
     () => $activeTerminalHandle.get()?.selectAll(),
     hotkeyOpts,
   )
 
   // ⌘⇧T — reopen the last closed tab in its original project
   useHotkeys(
-    'meta+shift+t',
+    `meta+shift+${Keys.T}`,
     () => {
       const closed = popClosedTab()
       if (!closed) return
@@ -221,7 +231,7 @@ export function WorkspaceLayout() {
 
   // ⌘F — open the find overlay over the active terminal
   useHotkeys(
-    'meta+f',
+    `meta+${Keys.F}`,
     () => {
       const projectId = $activeProjectId.get()
       const tabId = $activeTabId.get()[projectId] ?? ''
@@ -233,14 +243,14 @@ export function WorkspaceLayout() {
 
   // ⌘G / ⌘⇧G — find next / previous (only meaningful while bar is open)
   useHotkeys(
-    'meta+g',
+    `meta+${Keys.G}`,
     () => {
       if ($activeSearch.get()) $activeTerminalHandle.get()?.searchNext()
     },
     hotkeyOpts,
   )
   useHotkeys(
-    'meta+shift+g',
+    `meta+shift+${Keys.G}`,
     () => {
       if ($activeSearch.get()) $activeTerminalHandle.get()?.searchPrevious()
     },
