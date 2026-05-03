@@ -105,15 +105,22 @@ const LIGHT_THEME: ITheme = {
 // (react-hotkeys-hook at document level). Returning false from xterm's
 // attachCustomKeyEventHandler skips xterm's own handler so the event bubbles.
 //
-// Cmd-based: every app shortcut uses Cmd, and Cmd+anything has no
+// Cmd-based: every primary app shortcut uses Cmd, and Cmd+anything has no
 // meaningful translation to a PTY control byte on macOS — so suppressing
 // xterm's handler for any meta-key combo is safe and removes the
 // per-shortcut allowlist that grew with the keymap.
 //
+// Ctrl+Tab / Ctrl+Shift+Tab are the only Ctrl-based aliases: they back
+// the Cmd+Shift+] / Cmd+Shift+[ tab-nav muscle memory from Apple Terminal,
+// VS Code, Chrome. Safe on Ctrl because Ctrl+Tab has no readline binding
+// (Tab itself is shell-bound but Ctrl+Tab isn't).
+//
 // Browser-level shortcuts (Cmd+C/V copy/paste) are handled above xterm
 // in the contenteditable layer and are unaffected by this filter.
 function isAppShortcut(e: KeyboardEvent): boolean {
-  return e.metaKey
+  if (e.metaKey) return true
+  if (e.ctrlKey && e.key === 'Tab') return true
+  return false
 }
 
 export const XTermTerminal = React.memo(function XTermTerminal({

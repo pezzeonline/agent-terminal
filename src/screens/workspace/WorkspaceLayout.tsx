@@ -110,9 +110,12 @@ export function WorkspaceLayout() {
     hotkeyOpts,
   )
 
-  // ⌘⇧] — cycle to the next tab in the active project (wraps around)
+  // ⌘⇧] / Ctrl+Tab — next tab. Both bound: ⌘⇧] is the macOS browser/iTerm
+  // consensus; Ctrl+Tab is the muscle-memory alias (Apple Terminal default,
+  // VS Code, Chrome). Safe to keep on Ctrl because `Ctrl+Tab` has no
+  // readline binding — `Tab` itself is shell-bound but `Ctrl+Tab` isn't.
   useHotkeys(
-    'meta+shift+]',
+    ['meta+shift+]', 'ctrl+tab'],
     () => {
       const projectId = $activeProjectId.get()
       const project = $projects.get().find((p) => p.id === projectId)
@@ -125,9 +128,9 @@ export function WorkspaceLayout() {
     hotkeyOpts,
   )
 
-  // ⌘⇧[ — cycle to the previous tab in the active project (wraps around)
+  // ⌘⇧[ / Ctrl+Shift+Tab — previous tab. Same dual-binding rationale as above.
   useHotkeys(
-    'meta+shift+[',
+    ['meta+shift+[', 'ctrl+shift+tab'],
     () => {
       const projectId = $activeProjectId.get()
       const project = $projects.get().find((p) => p.id === projectId)
