@@ -107,13 +107,3 @@ export const Keys = {
 } as const
 
 export type KeyName = (typeof Keys)[keyof typeof Keys]
-
-/** Modifier names accepted by react-hotkeys-hook binding strings. */
-export const Mod = {
-  Meta: 'meta',
-  Ctrl: 'ctrl',
-  Alt: 'alt',
-  Shift: 'shift',
-} as const
-
-export type ModName = (typeof Mod)[keyof typeof Mod]
