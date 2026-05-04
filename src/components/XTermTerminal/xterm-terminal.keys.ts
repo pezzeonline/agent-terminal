@@ -7,10 +7,13 @@
  * `attachCustomKeyEventHandler` skips xterm's own handler so the event
  * bubbles up to the document.
  *
- * Cmd-based: every primary app shortcut uses Cmd, and Cmd+anything has
- * no meaningful translation to a PTY control byte on macOS — so
- * suppressing xterm's handler for any meta-key combo is safe and
- * removes the per-shortcut allowlist that grew with the keymap.
+ * Order in `handleKeyEvent` is load-bearing: line-edit and agent-newline
+ * translations are checked BEFORE this. So by the time we get here,
+ * the meta-key combos with PTY translations (`⌘←`, `⌘→`, `⌘⌫`) have
+ * already been handled — anything Cmd-based reaching this filter is
+ * an app shortcut bound at the react-hotkeys-hook layer (`⌘T`, `⌘W`,
+ * `⌘K`, `⌘F`, `⌘1..9`, …). Bubbling all remaining meta-key combos is
+ * safe and removes the per-shortcut allowlist that grew with the keymap.
  *
  * Ctrl+Tab / Ctrl+Shift+Tab are the only Ctrl-based aliases: they back
  * the Cmd+Shift+] / Cmd+Shift+[ tab-nav muscle memory from Apple
