@@ -3,7 +3,6 @@ import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
 import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebglAddon } from '@xterm/addon-webgl'
-import type { ITheme } from '@xterm/xterm'
 import { Terminal } from '@xterm/xterm'
 import React, { useEffect, useRef } from 'react'
 import { $activeSearch } from '@/modules/stores/$activeSearch'
@@ -33,107 +32,27 @@ type Props = {
   onReady: (handle: XTermHandle) => void
   onData: (data: string) => void
   onResize: (cols: number, rows: number) => void
+  /**
+   * True when the pane's tab is currently running an AI agent
+   * (`$tabMeta[tabKey].type === 'agent'`). Drives the Shift+Enter /
+   * Option+Enter newline translation in the key handler — outside agent
+   * tabs those chords pass through unchanged.
+   */
+  isAgent: boolean
   className?: string
 }
 
-// VS Code Dark+ palette, sourced from VS Code's terminal defaults
-// (src/vs/workbench/contrib/terminal/browser/terminalConfiguration.ts, MIT).
-//
-// Deviations from upstream:
-//   - `background` is set to `#0e0f10` (upstream `#1e1e1e`) so the terminal
-//     pane matches the app's --terminal-background CSS variable and blends
-//     with the surrounding chrome.
-//   - `cursorAccent` follows the overridden background. cursorAccent is
-//     drawn behind a block-style cursor and must equal the terminal bg for
-//     the cursor character to invert cleanly; it's a derived value, not an
-//     independent palette choice.
-//
-// Every other slot (foreground, cursor, ANSI 16, selection) is upstream-faithful.
-//
-// `selectionForeground` is the load-bearing addition vs. the previous
-// hand-rolled palette: without it, xterm.js leaves the glyph colour
-// unchanged when a cell is selected, causing the WebGL renderer to
-// re-rasterise glyphs with shifted contrast and producing a visible
-// "font wobble" during selection.
-const DARK_THEME: ITheme = {
-  background: '#0e0f10', // matches --terminal-background (dark)
-  foreground: '#cccccc',
-  cursor: '#aeafad',
-  cursorAccent: '#0e0f10',
-  selectionBackground: '#264f78',
-  selectionForeground: '#ffffff',
-  selectionInactiveBackground: '#3a3d41',
-  black: '#000000',
-  red: '#cd3131',
-  green: '#0dbc79',
-  yellow: '#e5e510',
-  blue: '#2472c8',
-  magenta: '#bc3fbc',
-  cyan: '#11a8cd',
-  white: '#e5e5e5',
-  brightBlack: '#666666',
-  brightRed: '#f14c4c',
-  brightGreen: '#23d18b',
-  brightYellow: '#f5f543',
-  brightBlue: '#3b8eea',
-  brightMagenta: '#d670d6',
-  brightCyan: '#29b8db',
-  brightWhite: '#e5e5e5',
-}
-
-// VS Code Light+ palette, same source as Dark+ above.
-const LIGHT_THEME: ITheme = {
-  background: '#ffffff', // matches --terminal-background (light)
-  foreground: '#333333',
-  cursor: '#333333',
-  cursorAccent: '#ffffff',
-  selectionBackground: '#add6ff',
-  selectionForeground: '#000000',
-  selectionInactiveBackground: '#e5ebf1',
-  black: '#000000',
-  red: '#cd3131',
-  green: '#00bc00',
-  yellow: '#949800',
-  blue: '#0451a5',
-  magenta: '#bc05bc',
-  cyan: '#0598bc',
-  white: '#555555',
-  brightBlack: '#666666',
-  brightRed: '#cd3131',
-  brightGreen: '#14ce14',
-  brightYellow: '#b5ba00',
-  brightBlue: '#0451a5',
-  brightMagenta: '#bc05bc',
-  brightCyan: '#0598bc',
-  brightWhite: '#a5a5a5',
-}
-
-// Returns true when the key combo is claimed by the app's hotkey layer
-// (react-hotkeys-hook at document level). Returning false from xterm's
-// attachCustomKeyEventHandler skips xterm's own handler so the event bubbles.
-//
-// Cmd-based: every primary app shortcut uses Cmd, and Cmd+anything has no
-// meaningful translation to a PTY control byte on macOS — so suppressing
-// xterm's handler for any meta-key combo is safe and removes the
-// per-shortcut allowlist that grew with the keymap.
-//
-// Ctrl+Tab / Ctrl+Shift+Tab are the only Ctrl-based aliases: they back
-// the Cmd+Shift+] / Cmd+Shift+[ tab-nav muscle memory from Apple Terminal,
-// VS Code, Chrome. Safe on Ctrl because Ctrl+Tab has no readline binding
-// (Tab itself is shell-bound but Ctrl+Tab isn't).
-//
-// Browser-level shortcuts (Cmd+C/V copy/paste) are handled above xterm
-// in the contenteditable layer and are unaffected by this filter.
-function isAppShortcut(e: KeyboardEvent): boolean {
-  if (e.metaKey) return true
-  if (e.ctrlKey && e.key === 'Tab') return true
-  return false
-}
+import { handleKeyEvent } from '@/components/XTermTerminal/xterm-terminal.keys'
+import {
+  DARK_THEME,
+  LIGHT_THEME,
+} from '@/components/XTermTerminal/xterm-terminal.themes'
 
 export const XTermTerminal = React.memo(function XTermTerminal({
   onReady,
   onData,
   onResize,
+  isAgent,
   className,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -142,16 +61,20 @@ export const XTermTerminal = React.memo(function XTermTerminal({
   const searchAddonRef = useRef<SearchAddon | null>(null)
   const fontSize = useStore($fontSize)
 
-  // Keep callbacks in refs so the mount-once effect always calls the latest
-  // versions without needing to re-run when they change reference.
+  // Keep callbacks (and the agent flag) in refs so the mount-once effect
+  // always sees the latest versions without needing to re-run when they
+  // change reference. The custom key handler reads `isAgentRef.current`
+  // so toggling agent state mid-session reflects on the next keypress.
   const onReadyRef = useRef(onReady)
   const onDataRef = useRef(onData)
   const onResizeRef = useRef(onResize)
+  const isAgentRef = useRef(isAgent)
   useEffect(() => {
     onReadyRef.current = onReady
     onDataRef.current = onData
     onResizeRef.current = onResize
-  }, [onReady, onData, onResize])
+    isAgentRef.current = isAgent
+  }, [onReady, onData, onResize, isAgent])
 
   useEffect(() => {
     const container = containerRef.current
@@ -197,7 +120,15 @@ export const XTermTerminal = React.memo(function XTermTerminal({
     // Pass app-level shortcuts through to document-level hotkey handlers.
     // xterm calls preventDefault on keys it processes; returning false here
     // short-circuits that so the events bubble up to react-hotkeys-hook.
-    term.attachCustomKeyEventHandler((e) => !isAppShortcut(e))
+    // Single dispatch — see `xterm-terminal.keys.ts` for the precedence
+    // rules between agent-newline / line-edit translation / app shortcut
+    // bubbling / xterm default.
+    term.attachCustomKeyEventHandler((e) =>
+      handleKeyEvent(e, {
+        isAgent: isAgentRef.current,
+        onData: onDataRef.current,
+      }),
+    )
 
     // WebGL renderer — falls back to xterm's built-in DOM renderer on context
     // loss. The canvas addon is not used: it is v5-only and was removed in v6.
