@@ -1,7 +1,9 @@
 import { invoke } from '@tauri-apps/api/core'
 import { atom } from 'nanostores'
-import { $projects } from '@/modules/stores/$projects'
+import { $projects, addTab } from '@/modules/stores/$projects'
+import { $tabMeta } from '@/modules/stores/$tabMeta'
 import { makeTabKey } from '@/screens/workspace/workspace.helpers'
+import type { Tab } from '@/screens/workspace/workspace.types'
 
 /**
  * Best-effort: clear any pending OS notification for the navigated tab.
@@ -64,6 +66,27 @@ export function onTabRemoved(projectId: string, removedTabId: string): void {
   const newActive =
     remaining[Math.max(0, idx - 1)]?.id ?? remaining[0]?.id ?? ''
   $activeTabId.set({ ...$activeTabId.get(), [projectId]: newActive })
+}
+
+/**
+ * Open a fresh tab in `projectId`, inheriting the live cwd from that
+ * project's currently-active tab, and switch to the new tab.
+ *
+ * Reads from `$tabMeta` (synchronous OSC 7 cwd) rather than `Tab.lastCwd`
+ * because `Tab.lastCwd` is debounced (cwd-persist.ts) — it lags the live
+ * cwd by up to 2s, so a quick `cd` followed by ⌘T would otherwise inherit
+ * the pre-`cd` directory.
+ */
+export function openNewTabInProject(projectId: string): Tab | null {
+  const activeTabId = $activeTabId.get()[projectId]
+  const inheritCwd = activeTabId
+    ? $tabMeta.get()[makeTabKey(projectId, activeTabId)]?.cwd
+    : undefined
+  const newTab = addTab(projectId, inheritCwd || undefined)
+  if (!newTab) return null
+  navigateToProject(projectId)
+  navigateToTab(projectId, newTab.id)
+  return newTab
 }
 
 /** Initialize navigation from loaded projects (called on app start). */
