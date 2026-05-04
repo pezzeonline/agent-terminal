@@ -69,18 +69,36 @@ export function onTabRemoved(projectId: string, removedTabId: string): void {
 }
 
 /**
- * Open a fresh tab in `projectId`, inheriting the live cwd from that
- * project's currently-active tab, and switch to the new tab.
+ * Open a fresh tab in `projectId`, inheriting cwd from a sensible source
+ * tab in the same project, and switch to the new tab. Cwd is resolved as:
  *
- * Reads from `$tabMeta` (synchronous OSC 7 cwd) rather than `Tab.lastCwd`
- * because `Tab.lastCwd` is debounced (cwd-persist.ts) — it lags the live
- * cwd by up to 2s, so a quick `cd` followed by ⌘T would otherwise inherit
- * the pre-`cd` directory.
+ *   1. Live OSC 7 cwd from `$tabMeta` (this session's `cd`s)
+ *   2. Persisted `Tab.lastCwd` (debounced into `$projects` last session)
+ *   3. Otherwise `undefined` → caller falls through to `project.path`
+ *
+ * Source tab is `$activeTabId` for the project if set, otherwise
+ * `project.tabs[0]` — covers the case where the user clicks a non-active
+ * project's "+" button, in which case `$activeTabId` has no entry for
+ * that project yet (it's lazy-populated on `navigateToProject`, and not
+ * persisted across sessions).
+ *
+ * Why two cwd layers: `$tabMeta` only has entries for tabs whose PTYs
+ * have spawned this session. For a project never visited in this session
+ * but with persisted state from disk, `$tabMeta` is empty and we need to
+ * fall back to the persisted `Tab.lastCwd`. `Tab.lastCwd` itself lags
+ * live cwd by up to 2s (cwd-persist.ts debounce), which is why we prefer
+ * `$tabMeta` first when both are available.
  */
 export function openNewTabInProject(projectId: string): Tab | null {
-  const activeTabId = $activeTabId.get()[projectId]
-  const inheritCwd = activeTabId
-    ? $tabMeta.get()[makeTabKey(projectId, activeTabId)]?.cwd
+  const project = $projects.get().find((p) => p.id === projectId)
+  if (!project) return null
+  const sourceTabId = $activeTabId.get()[projectId] ?? project.tabs[0]?.id
+  const sourceTab = sourceTabId
+    ? project.tabs.find((t) => t.id === sourceTabId)
+    : undefined
+  const inheritCwd = sourceTab
+    ? ($tabMeta.get()[makeTabKey(projectId, sourceTab.id)]?.cwd ??
+      sourceTab.lastCwd)
     : undefined
   const newTab = addTab(projectId, inheritCwd || undefined)
   if (!newTab) return null
