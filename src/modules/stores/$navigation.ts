@@ -92,10 +92,14 @@ export function onTabRemoved(projectId: string, removedTabId: string): void {
 export function openNewTabInProject(projectId: string): Tab | null {
   const project = $projects.get().find((p) => p.id === projectId)
   if (!project) return null
-  const sourceTabId = $activeTabId.get()[projectId] ?? project.tabs[0]?.id
-  const sourceTab = sourceTabId
-    ? project.tabs.find((t) => t.id === sourceTabId)
-    : undefined
+  // `?? project.tabs[0]` covers BOTH "no entry recorded" AND "recorded id no
+  // longer exists in project.tabs" (stale state from a removal that didn't
+  // route through onTabRemoved, persistence drift, etc.) — find() returning
+  // undefined is treated identically to no entry.
+  const activeTabId = $activeTabId.get()[projectId]
+  const sourceTab =
+    (activeTabId && project.tabs.find((t) => t.id === activeTabId)) ??
+    project.tabs[0]
   const inheritCwd = sourceTab
     ? ($tabMeta.get()[makeTabKey(projectId, sourceTab.id)]?.cwd ??
       sourceTab.lastCwd)
