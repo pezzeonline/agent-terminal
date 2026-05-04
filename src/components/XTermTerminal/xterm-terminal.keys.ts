@@ -94,6 +94,14 @@ export type HandleKeyEventOpts = {
 }
 
 /**
+ * Returns the byte sequence this event translates to, if any. Pure —
+ * safe to call multiple times for the same event without side effects.
+ */
+function matchTranslation(e: KeyboardEvent, isAgent: boolean): string | null {
+  return translateAgentNewline(e, isAgent) ?? translateLineEdit(e)
+}
+
+/**
  * Single dispatch point for `attachCustomKeyEventHandler`. Returns
  * `true` to let xterm process the event normally, `false` to suppress
  * it (either because we wrote translated bytes ourselves or because
@@ -102,19 +110,23 @@ export type HandleKeyEventOpts = {
  * Order matters — translations win over app-shortcut bubbling because
  * some translations (Cmd+arrow) would otherwise be eaten by
  * `isAppShortcut` returning true for any meta-key combo.
+ *
+ * Important: xterm's `attachCustomKeyEventHandler` fires for `keydown`,
+ * `keypress`, AND `keyup` (three call sites in `CoreBrowserTerminal`).
+ * The match check runs on every flavor so xterm's default stays
+ * suppressed across the whole event lifecycle (otherwise xterm would
+ * still emit the original byte from its keypress handler, leaking
+ * through our translation). The side-effecting write only fires on
+ * keydown, so each physical keypress sends the translated bytes
+ * exactly once.
  */
 export function handleKeyEvent(
   e: KeyboardEvent,
   opts: HandleKeyEventOpts,
 ): boolean {
-  const newline = translateAgentNewline(e, opts.isAgent)
-  if (newline !== null) {
-    opts.onData(newline)
-    return false
-  }
-  const lineEdit = translateLineEdit(e)
-  if (lineEdit !== null) {
-    opts.onData(lineEdit)
+  const translation = matchTranslation(e, opts.isAgent)
+  if (translation !== null) {
+    if (e.type === 'keydown') opts.onData(translation)
     return false
   }
   if (isAppShortcut(e)) return false
