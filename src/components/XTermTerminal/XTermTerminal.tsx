@@ -29,11 +29,24 @@ export type XTermHandle = {
   /**
    * Writes data into the PTY as if the user typed it. Goes through the
    * same `onData` channel xterm uses for keypresses, so it ends up at
-   * `IPC.writePty(tabKey, data)` via TerminalPane's `handleData`. Used
-   * by the file-drop flow and any future flow that injects text on
-   * the user's behalf.
+   * `IPC.writePty(tabKey, data)` via TerminalPane's `handleData`. Raw
+   * — no transformation. Use for flows that genuinely simulate typing
+   * (snippet expand, character-by-character autocomplete).
    */
   sendToPty: (data: string) => void
+  /**
+   * Writes data as a paste. If the running app has enabled bracketed
+   * paste mode (DECSET 2004 — Claude Code, Codex, modern shells all
+   * do), wraps the payload with `\x1b[200~` ... `\x1b[201~` so the
+   * app can distinguish paste from typed input. Without that, agents
+   * like Claude Code render dropped file paths as plain text instead
+   * of attaching them as `[image]`.
+   *
+   * If bracketed paste is off (e.g., raw `cat` waiting for input),
+   * sends unwrapped — otherwise the markers would appear as visible
+   * escape garbage.
+   */
+  pasteToPty: (data: string) => void
 }
 
 type Props = {
@@ -208,6 +221,13 @@ export const XTermTerminal = React.memo(function XTermTerminal({
         })
       },
       sendToPty: (data) => onDataRef.current(data),
+      pasteToPty: (data) => {
+        const term = termRef.current
+        if (!term) return
+        const wrap = term.modes.bracketedPasteMode
+        const payload = wrap ? `\x1b[200~${data}\x1b[201~` : data
+        onDataRef.current(payload)
+      },
     })
 
     return () => {

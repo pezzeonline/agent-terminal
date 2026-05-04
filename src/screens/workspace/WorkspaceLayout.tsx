@@ -89,10 +89,12 @@ export function WorkspaceLayout() {
 
   // File drag-drop — Tauri 2 captures the OS drop at the window level
   // (default `dragDropEnabled: true`) and emits a JS event. On `drop` we
-  // shell-quote the paths and write them into the active terminal's PTY,
-  // which makes the experience identical to Apple Terminal / iTerm2 /
-  // Ghostty: the agent (Claude / Codex) or shell sees the path text and
-  // decides what to do with it.
+  // shell-quote the paths and paste them into the active terminal's PTY.
+  //
+  // `pasteToPty` (not `sendToPty`) wraps the payload in bracketed paste
+  // markers if the running app enabled them — Claude Code / Codex use
+  // that signal to distinguish paste from typed input and auto-attach
+  // image paths as [image] instead of inserting them as raw text.
   useEffect(() => {
     const unlistenPromise = getCurrentWebview().onDragDropEvent((event) => {
       if (event.payload.type !== 'drop') return
@@ -100,7 +102,7 @@ export function WorkspaceLayout() {
       if (!payload) return
       // No active terminal (e.g. no projects open yet) — drop silently.
       // Same posture as the other global handlers.
-      $activeTerminalHandle.get()?.sendToPty(payload)
+      $activeTerminalHandle.get()?.pasteToPty(payload)
     })
     return () => {
       unlistenPromise.then((fn) => fn()).catch(() => {})
