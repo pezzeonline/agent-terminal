@@ -1,3 +1,4 @@
+import { useStore } from '@nanostores/react'
 import React, { useCallback, useEffect, useRef } from 'react'
 import {
   type XTermHandle,
@@ -6,6 +7,7 @@ import {
 import { IPC } from '@/modules/ipc/commands'
 import { onPtyExit, onPtyRespawned } from '@/modules/ipc/events'
 import { $activeTerminalHandle } from '@/modules/stores/$activeTerminal'
+import { $tabMeta } from '@/modules/stores/$tabMeta'
 import { makeTabKey } from '@/screens/workspace/workspace.helpers'
 
 // Tracks in-flight openTab calls per tabKey. Prevents concurrent calls
@@ -31,6 +33,11 @@ export const TerminalPane = React.memo(function TerminalPane({
 }: Props) {
   const tabKey = makeTabKey(projectId, tabId)
   const handleRef = useRef<XTermHandle | null>(null)
+  // Reactive read — flips on the next render whenever ClaudeCodeMod /
+  // CodexMod sets or clears `type === 'agent'` for this tab. xterm's
+  // key handler reads it (via ref) on the next keypress.
+  const allTabMeta = useStore($tabMeta)
+  const isAgent = allTabMeta[tabKey]?.type === 'agent'
 
   // Auto-focus the xterm canvas when this tab becomes active.
   //
@@ -160,6 +167,7 @@ export const TerminalPane = React.memo(function TerminalPane({
       onReady={handleReady}
       onData={handleData}
       onResize={handleResize}
+      isAgent={isAgent}
       className="h-full min-h-0 w-full"
     />
   )

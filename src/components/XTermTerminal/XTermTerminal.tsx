@@ -33,6 +33,13 @@ type Props = {
   onReady: (handle: XTermHandle) => void
   onData: (data: string) => void
   onResize: (cols: number, rows: number) => void
+  /**
+   * True when the pane's tab is currently running an AI agent
+   * (`$tabMeta[tabKey].type === 'agent'`). Drives the Shift+Enter /
+   * Option+Enter newline translation in the key handler — outside agent
+   * tabs those chords pass through unchanged.
+   */
+  isAgent: boolean
   className?: string
 }
 
@@ -108,32 +115,13 @@ const LIGHT_THEME: ITheme = {
   brightWhite: '#a5a5a5',
 }
 
-// Returns true when the key combo is claimed by the app's hotkey layer
-// (react-hotkeys-hook at document level). Returning false from xterm's
-// attachCustomKeyEventHandler skips xterm's own handler so the event bubbles.
-//
-// Cmd-based: every primary app shortcut uses Cmd, and Cmd+anything has no
-// meaningful translation to a PTY control byte on macOS — so suppressing
-// xterm's handler for any meta-key combo is safe and removes the
-// per-shortcut allowlist that grew with the keymap.
-//
-// Ctrl+Tab / Ctrl+Shift+Tab are the only Ctrl-based aliases: they back
-// the Cmd+Shift+] / Cmd+Shift+[ tab-nav muscle memory from Apple Terminal,
-// VS Code, Chrome. Safe on Ctrl because Ctrl+Tab has no readline binding
-// (Tab itself is shell-bound but Ctrl+Tab isn't).
-//
-// Browser-level shortcuts (Cmd+C/V copy/paste) are handled above xterm
-// in the contenteditable layer and are unaffected by this filter.
-function isAppShortcut(e: KeyboardEvent): boolean {
-  if (e.metaKey) return true
-  if (e.ctrlKey && e.key === 'Tab') return true
-  return false
-}
+import { handleKeyEvent } from '@/components/XTermTerminal/xterm-terminal.keys'
 
 export const XTermTerminal = React.memo(function XTermTerminal({
   onReady,
   onData,
   onResize,
+  isAgent,
   className,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -142,16 +130,20 @@ export const XTermTerminal = React.memo(function XTermTerminal({
   const searchAddonRef = useRef<SearchAddon | null>(null)
   const fontSize = useStore($fontSize)
 
-  // Keep callbacks in refs so the mount-once effect always calls the latest
-  // versions without needing to re-run when they change reference.
+  // Keep callbacks (and the agent flag) in refs so the mount-once effect
+  // always sees the latest versions without needing to re-run when they
+  // change reference. The custom key handler reads `isAgentRef.current`
+  // so toggling agent state mid-session reflects on the next keypress.
   const onReadyRef = useRef(onReady)
   const onDataRef = useRef(onData)
   const onResizeRef = useRef(onResize)
+  const isAgentRef = useRef(isAgent)
   useEffect(() => {
     onReadyRef.current = onReady
     onDataRef.current = onData
     onResizeRef.current = onResize
-  }, [onReady, onData, onResize])
+    isAgentRef.current = isAgent
+  }, [onReady, onData, onResize, isAgent])
 
   useEffect(() => {
     const container = containerRef.current
@@ -197,7 +189,15 @@ export const XTermTerminal = React.memo(function XTermTerminal({
     // Pass app-level shortcuts through to document-level hotkey handlers.
     // xterm calls preventDefault on keys it processes; returning false here
     // short-circuits that so the events bubble up to react-hotkeys-hook.
-    term.attachCustomKeyEventHandler((e) => !isAppShortcut(e))
+    // Single dispatch — see `xterm-terminal.keys.ts` for the precedence
+    // rules between agent-newline / line-edit translation / app shortcut
+    // bubbling / xterm default.
+    term.attachCustomKeyEventHandler((e) =>
+      handleKeyEvent(e, {
+        isAgent: isAgentRef.current,
+        onData: onDataRef.current,
+      }),
+    )
 
     // WebGL renderer — falls back to xterm's built-in DOM renderer on context
     // loss. The canvas addon is not used: it is v5-only and was removed in v6.
