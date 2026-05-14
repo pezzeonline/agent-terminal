@@ -1,0 +1,133 @@
+import { describe, expect, test } from 'bun:test'
+import {
+  checksColor,
+  stateLabel,
+  truncate,
+} from '@/components/StatusBar/PrItem'
+import type { PrInfo } from '@/modules/stores/$tabMeta'
+
+/* ---------------------------------------------------------------------------
+ * truncate
+ * -------------------------------------------------------------------------*/
+
+describe('truncate', () => {
+  test('passes through strings shorter than the limit', () => {
+    expect(truncate('hi', 10)).toBe('hi')
+  })
+
+  test('passes through strings exactly at the limit', () => {
+    expect(truncate('hello', 5)).toBe('hello')
+  })
+
+  test('truncates and appends an ellipsis when over the limit', () => {
+    expect(truncate('hello world', 8)).toBe('hello w…')
+    expect(truncate('hello world', 8).length).toBe(8)
+  })
+
+  test('keeps the trailing character count exact (ellipsis counts as one)', () => {
+    // 40-char cap is the real-world value; the cap is inclusive.
+    const long = 'a'.repeat(80)
+    const truncated = truncate(long, 40)
+    expect(truncated.length).toBe(40)
+    expect(truncated.endsWith('…')).toBe(true)
+  })
+})
+
+/* ---------------------------------------------------------------------------
+ * stateLabel
+ * -------------------------------------------------------------------------*/
+
+function pr(overrides: Partial<PrInfo> = {}): PrInfo {
+  return {
+    number: 1,
+    title: 't',
+    state: 'OPEN',
+    isDraft: false,
+    url: 'https://example.com/pr/1',
+    ...overrides,
+  }
+}
+
+describe('stateLabel', () => {
+  test('open non-draft reads as "open"', () => {
+    expect(stateLabel(pr())).toBe('open')
+  })
+
+  test('open + isDraft reads as "draft"', () => {
+    expect(stateLabel(pr({ isDraft: true }))).toBe('draft')
+  })
+
+  test('merged overrides isDraft', () => {
+    // Defence in depth — if backend ever sends MERGED + isDraft (it
+    // shouldn't, but…), we want the user-visible label to reflect the
+    // terminal state, not a stale draft flag.
+    expect(stateLabel(pr({ state: 'MERGED', isDraft: true }))).toBe('merged')
+  })
+
+  test('closed reads as "closed"', () => {
+    expect(stateLabel(pr({ state: 'CLOSED' }))).toBe('closed')
+  })
+})
+
+/* ---------------------------------------------------------------------------
+ * checksColor
+ * -------------------------------------------------------------------------*/
+
+describe('checksColor', () => {
+  test("returns null when checks are undefined (CI hasn't reported yet)", () => {
+    expect(checksColor(undefined)).toBeNull()
+  })
+
+  test('returns null when total is zero (no CI configured)', () => {
+    expect(
+      checksColor({ passing: 0, failing: 0, pending: 0, skipped: 0, total: 0 }),
+    ).toBeNull()
+  })
+
+  test('red when any check is failing', () => {
+    // Failing dominates — even alongside passing + pending.
+    expect(
+      checksColor({ passing: 5, failing: 1, pending: 2, skipped: 0, total: 8 }),
+    ).toBe('var(--terminal-red)')
+  })
+
+  test('yellow when none failing but some pending', () => {
+    expect(
+      checksColor({ passing: 3, failing: 0, pending: 2, skipped: 0, total: 5 }),
+    ).toBe('var(--terminal-yellow)')
+  })
+
+  test('green when all passing', () => {
+    expect(
+      checksColor({ passing: 5, failing: 0, pending: 0, skipped: 0, total: 5 }),
+    ).toBe('var(--terminal-green)')
+  })
+
+  test('green when all passing + skipped (skipped treated as success)', () => {
+    // Skipped checks are intentional (matrix gating, path filters). Showing
+    // red because half the matrix was filtered out would mislead.
+    expect(
+      checksColor({ passing: 2, failing: 0, pending: 0, skipped: 3, total: 5 }),
+    ).toBe('var(--terminal-green)')
+  })
+
+  test('green when all skipped (no passes, no failures)', () => {
+    // Edge case: every check filtered out by a path matcher. Read as
+    // "nothing is broken" — green, not yellow.
+    expect(
+      checksColor({ passing: 0, failing: 0, pending: 0, skipped: 4, total: 4 }),
+    ).toBe('var(--terminal-green)')
+  })
+
+  test('red precedence: 1 failing + 99 pending still red', () => {
+    expect(
+      checksColor({
+        passing: 0,
+        failing: 1,
+        pending: 99,
+        skipped: 0,
+        total: 100,
+      }),
+    ).toBe('var(--terminal-red)')
+  })
+})

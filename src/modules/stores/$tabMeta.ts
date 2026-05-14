@@ -10,13 +10,39 @@ export type TabType = 'shell' | 'task' | 'agent'
  */
 export type AgentTurnState = 'idle' | 'in-progress' | 'awaiting' | 'completed'
 
+export type PrState = 'OPEN' | 'MERGED' | 'CLOSED'
+
+/**
+ * Compact CI rollup populated by GitMonitorMod from `gh pr view`'s
+ * `statusCheckRollup`. Rust does the bucketing so the frontend treats this
+ * as a closed 4-bucket counter — unknown check states are dropped on the
+ * way out, never producing an "unclassified" bucket here.
+ */
+export type PrChecks = {
+  passing: number
+  failing: number
+  pending: number
+  skipped: number
+  total: number
+}
+
+export type PrInfo = {
+  number: number
+  title: string
+  state: PrState
+  isDraft: boolean
+  url: string
+  /** Undefined when no checks have reported yet (or repo has no CI). */
+  checks?: PrChecks
+}
+
 export type GitInfo = {
   branch: string
   aheadBy: number
   behindBy: number
   isDirty: boolean
   worktree?: string
-  pr?: { number: number; title: string; state: string; url: string }
+  pr?: PrInfo
 }
 
 /**
