@@ -7,7 +7,7 @@ import {
   closeSearch,
   setSearchQuery,
 } from '@/modules/stores/$activeSearch'
-import { $activeTerminalHandle } from '@/modules/stores/$activeTerminal'
+import { getActiveTerminalHandle } from '@/modules/stores/$activeTerminal'
 
 /**
  * Floating overlay that opens via Cmd+F over the active terminal. Drives
@@ -30,7 +30,7 @@ export function TerminalSearchBar() {
     () => {
       if (!search) return
       closeSearch()
-      $activeTerminalHandle.get()?.focus()
+      getActiveTerminalHandle()?.focus()
     },
     { enableOnFormTags: true, enabled: !!search },
   )
@@ -48,13 +48,13 @@ export function TerminalSearchBar() {
           // existing selection while the growing query still matches it,
           // so the highlight stays anchored to the current match instead
           // of bouncing forward through the buffer on every keystroke.
-          $activeTerminalHandle.get()?.searchNext({ incremental: true })
+          getActiveTerminalHandle()?.searchNext({ incremental: true })
         }}
         onKeyDown={(e) => {
           if (e.key === 'Enter') {
             e.preventDefault()
-            if (e.shiftKey) $activeTerminalHandle.get()?.searchPrevious()
-            else $activeTerminalHandle.get()?.searchNext()
+            if (e.shiftKey) getActiveTerminalHandle()?.searchPrevious()
+            else getActiveTerminalHandle()?.searchNext()
           }
         }}
         className="w-48 bg-transparent text-sm outline-none"
@@ -62,7 +62,7 @@ export function TerminalSearchBar() {
       />
       <button
         type="button"
-        onClick={() => $activeTerminalHandle.get()?.searchPrevious()}
+        onClick={() => getActiveTerminalHandle()?.searchPrevious()}
         className="rounded px-1 text-xs hover:bg-accent"
         title="Previous (⇧⏎)"
         aria-label="Previous match"
@@ -71,7 +71,7 @@ export function TerminalSearchBar() {
       </button>
       <button
         type="button"
-        onClick={() => $activeTerminalHandle.get()?.searchNext()}
+        onClick={() => getActiveTerminalHandle()?.searchNext()}
         className="rounded px-1 text-xs hover:bg-accent"
         title="Next (⏎)"
         aria-label="Next match"
@@ -82,7 +82,7 @@ export function TerminalSearchBar() {
         type="button"
         onClick={() => {
           closeSearch()
-          $activeTerminalHandle.get()?.focus()
+          getActiveTerminalHandle()?.focus()
         }}
         className="rounded px-1 text-xs hover:bg-accent"
         title="Close (Esc)"

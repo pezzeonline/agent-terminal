@@ -6,7 +6,10 @@ import {
 } from '@/components/XTermTerminal/XTermTerminal'
 import { IPC } from '@/modules/ipc/commands'
 import { onPtyExit, onPtyRespawned } from '@/modules/ipc/events'
-import { $activeTerminalHandle } from '@/modules/stores/$activeTerminal'
+import {
+  registerTerminalHandle,
+  unregisterTerminalHandle,
+} from '@/modules/stores/$activeTerminal'
 import { $tabMeta } from '@/modules/stores/$tabMeta'
 import { makeTabKey } from '@/screens/workspace/workspace.helpers'
 
@@ -51,26 +54,25 @@ export const TerminalPane = React.memo(function TerminalPane({
     }
   }, [isActive])
 
-  // Register this terminal as the active one whenever its tab is visible.
-  // Global hotkeys (Cmd+K, Cmd+A, Cmd+F, Cmd+G) read from the registry to
-  // dispatch terminal-scoped actions. Race-safe clear: only nil out the
-  // slot if it still points at us.
+  // Register this pane in the global handle registry while mounted.
+  // Registration is mount-scoped (NOT isActive-scoped) so the registry
+  // contains every live PTY. Which one is "active" is answered separately
+  // by `$activeTabKey`, derived from navigation state — that decoupling
+  // is what makes drag-drop / Cmd+F / Cmd+K target the right pane after
+  // arbitrary project-switching.
   //
-  // The matching set call inside `handleReady` (below) covers the case
-  // where the pane mounts already-active and the handle isn't ready yet
-  // when this effect first runs. Without that, first-launch left the
-  // registry stuck at null until the user switched tabs.
+  // The first run of this effect happens before xterm fires onReady, so
+  // `handleRef.current` is null and we no-op. `handleReady` (below) does
+  // the initial registration; this effect handles re-registration on
+  // tabKey change (rare — tabKey is stable per pane lifetime).
   useEffect(() => {
-    if (!isActive) return
-    if (handleRef.current) {
-      $activeTerminalHandle.set(handleRef.current)
-    }
+    const handle = handleRef.current
+    if (!handle) return
+    registerTerminalHandle(tabKey, handle)
     return () => {
-      if ($activeTerminalHandle.get() === handleRef.current) {
-        $activeTerminalHandle.set(null)
-      }
+      unregisterTerminalHandle(tabKey, handle)
     }
-  }, [isActive])
+  }, [tabKey])
 
   // Called once when the xterm canvas is ready.
   //
@@ -87,12 +89,13 @@ export const TerminalPane = React.memo(function TerminalPane({
   const handleReady = useCallback(
     (handle: XTermHandle) => {
       handleRef.current = handle
-      // If this pane mounted already-active, the registration effect above
-      // ran before the handle existed. Catch up now so global hotkeys
-      // work on first launch without requiring a tab switch.
-      if (isActive) {
-        $activeTerminalHandle.set(handle)
-      }
+      // First-paint registration: the mount effect above ran when
+      // handleRef was still null, so register the handle here now that
+      // xterm is ready. The race-safe identity guard inside
+      // unregisterTerminalHandle makes a double-call from StrictMode's
+      // dev double-fire safe — second call replaces the same entry, and
+      // unmount still cleans up the one and only slot.
+      registerTerminalHandle(tabKey, handle)
 
       if (pendingOpens.has(tabKey)) return
       pendingOpens.add(tabKey)
@@ -110,7 +113,7 @@ export const TerminalPane = React.memo(function TerminalPane({
           pendingOpens.delete(tabKey)
         })
     },
-    [tabKey, cwd, isActive],
+    [tabKey, cwd],
   )
 
   const handleData = useCallback(
