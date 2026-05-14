@@ -145,7 +145,35 @@ describe('register / unregister', () => {
     expect($terminalHandles.get().get('api-service:logs')).toBe(b)
   })
 
-  test('13: register / unregister swap the map identity so nanostores subscribers fire', () => {
+  test('13: TerminalPane lifecycle — deferred register followed by unmount cleanup clears the slot', () => {
+    // Mirrors TerminalPane: the mount effect runs before xterm fires
+    // onReady, so the handle ref is still null and the effect cannot
+    // register anything itself. handleReady registers later. The cleanup,
+    // captured at mount, must still unregister whatever was registered
+    // when it eventually runs at unmount — or the handle leaks.
+    const handleRef: { current: XTermHandle | null } = { current: null }
+
+    // 1. "Mount effect" runs — ref is null, nothing to do, but the
+    //    closure captures handleRef for the cleanup.
+    const cleanup = () => {
+      if (handleRef.current) {
+        unregisterTerminalHandle('claude-ui:dev', handleRef.current)
+      }
+    }
+
+    // 2. "handleReady" arrives — pane installs its handle and registers.
+    const h = fakeHandle()
+    handleRef.current = h
+    registerTerminalHandle('claude-ui:dev', h)
+    expect($terminalHandles.get().get('claude-ui:dev')).toBe(h)
+
+    // 3. "Unmount" — cleanup runs, reads the ref's CURRENT value (which
+    //    is now `h`), and unregisters.
+    cleanup()
+    expect($terminalHandles.get().has('claude-ui:dev')).toBe(false)
+  })
+
+  test('14: register / unregister swap the map identity so nanostores subscribers fire', () => {
     // Mutating the existing Map in place would not flip the store's
     // shallow-equality check. Each write must produce a new Map.
     const before = $terminalHandles.get()
@@ -159,17 +187,17 @@ describe('register / unregister', () => {
  * getActiveTerminalHandle — composition of navigation + registry
  * -------------------------------------------------------------------------*/
 describe('getActiveTerminalHandle()', () => {
-  test('14: returns null when no project is selected', () => {
+  test('15: returns null when no project is selected', () => {
     expect(getActiveTerminalHandle()).toBeNull()
   })
 
-  test('15: returns null when the active tab key has no entry in the registry', () => {
+  test('16: returns null when the active tab key has no entry in the registry', () => {
     $activeProjectId.set('claude-ui')
     $activeTabId.set({ 'claude-ui': 'dev' })
     expect(getActiveTerminalHandle()).toBeNull()
   })
 
-  test('16: returns the handle for the active tab key', () => {
+  test('17: returns the handle for the active tab key', () => {
     const h = fakeHandle()
     registerTerminalHandle('claude-ui:dev', h)
     $activeProjectId.set('claude-ui')
@@ -177,7 +205,7 @@ describe('getActiveTerminalHandle()', () => {
     expect(getActiveTerminalHandle()).toBe(h)
   })
 
-  test('17: switching projects switches the active handle without re-registering panes', () => {
+  test('18: switching projects switches the active handle without re-registering panes', () => {
     const aHandle = fakeHandle()
     const bHandle = fakeHandle()
     registerTerminalHandle('claude-ui:dev', aHandle)
@@ -195,7 +223,7 @@ describe('getActiveTerminalHandle()', () => {
     expect(getActiveTerminalHandle()).toBe(aHandle)
   })
 
-  test('18: switching tabs within the same project switches the active handle without re-registering', () => {
+  test('19: switching tabs within the same project switches the active handle without re-registering', () => {
     const devHandle = fakeHandle()
     const serverHandle = fakeHandle()
     registerTerminalHandle('claude-ui:dev', devHandle)
@@ -209,7 +237,7 @@ describe('getActiveTerminalHandle()', () => {
     expect(getActiveTerminalHandle()).toBe(serverHandle)
   })
 
-  test('19: returns null after the active pane unregisters, even if the registry still has other handles', () => {
+  test('20: returns null after the active pane unregisters, even if the registry still has other handles', () => {
     const aHandle = fakeHandle()
     const bHandle = fakeHandle()
     registerTerminalHandle('claude-ui:dev', aHandle)
@@ -223,7 +251,7 @@ describe('getActiveTerminalHandle()', () => {
     expect($terminalHandles.get().get('api-service:logs')).toBe(bHandle)
   })
 
-  test('20: returns the new handle after a remount (register → unregister-stale → register again)', () => {
+  test('21: returns the new handle after a remount (register → unregister-stale → register again)', () => {
     // Simulates StrictMode dev double-fire: handleReady runs twice, the
     // intervening unregister carries the stale identity, and the final
     // state must be the latest handle.

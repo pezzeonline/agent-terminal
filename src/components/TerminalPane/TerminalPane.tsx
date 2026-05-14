@@ -54,15 +54,18 @@ export const TerminalPane = React.memo(function TerminalPane({
     }
   }, [isActive])
 
-  // Registry membership is mount-scoped, not isActive-scoped. First mount
-  // runs before xterm's onReady, so handleRef is null and we no-op;
-  // handleReady does the initial register.
+  // Registry membership is mount-scoped, not isActive-scoped. The cleanup
+  // reads handleRef.current at teardown time — so an unmount AFTER a
+  // late handleReady registration still unregisters the handle, instead
+  // of leaking it.
   useEffect(() => {
-    const handle = handleRef.current
-    if (!handle) return
-    registerTerminalHandle(tabKey, handle)
+    if (handleRef.current) {
+      registerTerminalHandle(tabKey, handleRef.current)
+    }
     return () => {
-      unregisterTerminalHandle(tabKey, handle)
+      if (handleRef.current) {
+        unregisterTerminalHandle(tabKey, handleRef.current)
+      }
     }
   }, [tabKey])
 
