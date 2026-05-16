@@ -2,7 +2,7 @@ import { useStore } from '@nanostores/react'
 import { useEffect, useState } from 'react'
 import { TabBar } from '@/components/TabBar/TabBar'
 import { TerminalPane } from '@/components/TerminalPane/TerminalPane'
-import { $activeTabId } from '@/modules/stores/$navigation'
+import { $activeProjectId, $activeTabId } from '@/modules/stores/$navigation'
 import type { Project } from '@/screens/workspace/workspace.types'
 
 type Props = {
@@ -11,6 +11,7 @@ type Props = {
 
 export function WorkspaceView({ project }: Props) {
   const activeTabsByProject = useStore($activeTabId)
+  const activeProjectId = useStore($activeProjectId)
   // No fallback to project.tabs[0] here — tab selection is driven by
   // initNavigation() / navigateToProject() so the store is always authoritative.
   const activeTabId = activeTabsByProject[project.id] ?? ''
@@ -36,7 +37,8 @@ export function WorkspaceView({ project }: Props) {
       <div className="relative min-h-0 flex-1 bg-terminal">
         {project.tabs.map((tab) => {
           if (!mounted.has(tab.id)) return null
-          const isActive = tab.id === activeTabId
+          const isActive =
+            project.id === activeProjectId && tab.id === activeTabId
           return (
             <div
               key={tab.id}

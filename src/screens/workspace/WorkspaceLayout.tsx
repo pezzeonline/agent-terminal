@@ -8,7 +8,7 @@ import { TerminalSearchBar } from '@/components/TerminalSearchBar/TerminalSearch
 import { formatDropPayload } from '@/modules/dragDrop/dropPayload'
 import { Keys, Mod } from '@/modules/keymap/keys'
 import { $activeSearch, openSearch } from '@/modules/stores/$activeSearch'
-import { $activeTerminalHandle } from '@/modules/stores/$activeTerminal'
+import { getActiveTerminalHandle } from '@/modules/stores/$activeTerminal'
 import { popClosedTab } from '@/modules/stores/$closedTabs'
 import {
   decreaseFontSize,
@@ -102,7 +102,7 @@ export function WorkspaceLayout() {
       if (!payload) return
       // No active terminal (e.g. no projects open yet) — drop silently.
       // Same posture as the other global handlers.
-      $activeTerminalHandle.get()?.pasteToPty(payload)
+      getActiveTerminalHandle()?.pasteToPty(payload)
     })
     return () => {
       unlistenPromise.then((fn) => fn()).catch(() => {})
@@ -225,14 +225,14 @@ export function WorkspaceLayout() {
   // ⌘K — clear screen + scrollback in the active terminal
   useHotkeys(
     `${Mod.Meta}+${Keys.K}`,
-    () => $activeTerminalHandle.get()?.clear(),
+    () => getActiveTerminalHandle()?.clear(),
     hotkeyOpts,
   )
 
   // ⌘A — select all in the active terminal
   useHotkeys(
     `${Mod.Meta}+${Keys.A}`,
-    () => $activeTerminalHandle.get()?.selectAll(),
+    () => getActiveTerminalHandle()?.selectAll(),
     hotkeyOpts,
   )
 
@@ -272,14 +272,14 @@ export function WorkspaceLayout() {
   useHotkeys(
     `${Mod.Meta}+${Keys.G}`,
     () => {
-      if ($activeSearch.get()) $activeTerminalHandle.get()?.searchNext()
+      if ($activeSearch.get()) getActiveTerminalHandle()?.searchNext()
     },
     hotkeyOpts,
   )
   useHotkeys(
     `${Mod.Meta}+${Mod.Shift}+${Keys.G}`,
     () => {
-      if ($activeSearch.get()) $activeTerminalHandle.get()?.searchPrevious()
+      if ($activeSearch.get()) getActiveTerminalHandle()?.searchPrevious()
     },
     hotkeyOpts,
   )
