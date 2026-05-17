@@ -22,6 +22,7 @@ import {
 } from '@/modules/stores/$navigation'
 import { removeTab, renameTab, toggleTabPin } from '@/modules/stores/$projects'
 import { $tabMeta } from '@/modules/stores/$tabMeta'
+import { $tabRecency, MAX_BADGE_RANK } from '@/modules/stores/$tabRecency'
 import {
   MONO_FONT,
   makeTabKey,
@@ -39,9 +40,17 @@ export function SidebarTabItem({
   const activeProjectId = useStore($activeProjectId)
   const activeTabsByProject = useStore($activeTabId)
   const allTabMeta = useStore($tabMeta)
+  const recency = useStore($tabRecency)
   const isActive =
     activeProjectId === projectId && activeTabsByProject[projectId] === tab.id
-  const tabMeta = allTabMeta[makeTabKey(projectId, tab.id)]
+  const tabKey = makeTabKey(projectId, tab.id)
+  const tabMeta = allTabMeta[tabKey]
+  // Rank shown for the top MAX_BADGE_RANK tabs regardless of pin state —
+  // pinned + recent is a legit combination and the slot lives separately
+  // from the pin slot on the row's right side.
+  const recencyIdx = recency.indexOf(tabKey)
+  const rank =
+    recencyIdx >= 0 && recencyIdx < MAX_BADGE_RANK ? recencyIdx + 1 : 0
   const [renaming, setRenaming] = useState(false)
 
   const {
@@ -140,22 +149,26 @@ export function SidebarTabItem({
 
             {/*
              * Right-side indicators, left to right:
-             *   DangerBadge → StatusIcon
+             *   Rank digit (top 10 only) → DangerBadge → StatusIcon
              *
-             * DangerBadge sits immediately left of the status icon so it reads
-             * as "this agent is running hot" rather than a separate entity.
-             * PR info now lives in the status bar (StatusBarRight → PrItem)
-             * where there's room for a state icon, checks dot, and tooltip.
+             * Rank lives here (not in the left pin slot) so it can coexist
+             * with the pin icon — a pinned tab the user just touched should
+             * still surface as recent. PR info lives in the status bar.
              */}
+            {!renaming && rank > 0 && (
+              <span
+                aria-hidden="true"
+                title={`Recently active (rank ${rank})`}
+                className="w-3 shrink-0 select-none text-right tabular-nums opacity-50"
+                style={{ fontFamily: MONO_FONT, fontSize: 9.5 }}
+              >
+                {rank}
+              </span>
+            )}
             {!renaming &&
               tabMeta?.type === 'agent' &&
               hasDangerFlag(tabMeta.agentCmd) && <DangerBadge size={11} />}
-            {!renaming && (
-              <TabStatusIcon
-                tabId={makeTabKey(projectId, tab.id)}
-                active={isActive}
-              />
-            )}
+            {!renaming && <TabStatusIcon tabId={tabKey} active={isActive} />}
           </button>
         </div>
       </ContextMenuTrigger>

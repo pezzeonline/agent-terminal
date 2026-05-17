@@ -2,6 +2,7 @@ import { atom } from 'nanostores'
 import { IPC } from '@/modules/ipc/commands'
 import { pushClosedTab } from '@/modules/stores/$closedTabs'
 import { $tabMeta } from '@/modules/stores/$tabMeta'
+import { forgetTabRecency } from '@/modules/stores/$tabRecency'
 import {
   dedupeLabel,
   makeTabKey,
@@ -115,6 +116,10 @@ export function removeTab(projectId: string, tabId: string): void {
   }
 
   IPC.closeTab(makeTabKey(projectId, tabId)).catch(() => {})
+  // Clear recency at the source so the sidebar / palette never reference
+  // a dead tabKey. The palette also defensively filters orphan entries,
+  // but cleaning here keeps localStorage bounded and ranks accurate.
+  forgetTabRecency(makeTabKey(projectId, tabId))
   const updated = $projects
     .get()
     .map((p) =>
