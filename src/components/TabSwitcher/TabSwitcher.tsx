@@ -31,10 +31,14 @@ import { MONO_FONT } from '@/screens/workspace/workspace.helpers'
 /* ---------------------------------------------------------------------------
  * TabSwitcher — Cmd+P quick-switch palette.
  *
- * Lists every open tab sorted by recency. Fuzzy-filterable by typing into
- * the search input (label + project name + cwd). Enter switches to the
- * selected tab. Rank shown for every visited tab — no cap, unlike the
- * sidebar's 1..10 ambient badge.
+ * Lists every open tab sorted by recency. Filterable by typing into the
+ * search input — case-insensitive substring match across label + project
+ * name + cwd (filterSwitcherRows). Substring rather than fuzzy on purpose
+ * so the recency order is preserved among matches; a fuzzy scorer would
+ * re-rank by score and break that.
+ *
+ * Enter switches to the selected tab. Rank shown for every visited tab —
+ * no cap, unlike the sidebar's 1..10 ambient badge.
  * -------------------------------------------------------------------------*/
 
 // Owns its own open state and Cmd+P hotkey so consumers (WorkspaceLayout)

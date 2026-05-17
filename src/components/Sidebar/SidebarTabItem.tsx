@@ -159,7 +159,10 @@ export function SidebarTabItem({
               <span
                 aria-hidden="true"
                 title={`Recently active (rank ${rank})`}
-                className="w-3 shrink-0 select-none text-right tabular-nums opacity-50"
+                // w-4 (not w-3) leaves room for the two-digit "10" — at
+                // 9.5px JetBrains Mono with tabular-nums, "10" measures
+                // ~11-12px and would sit flush against a 12px slot.
+                className="w-4 shrink-0 select-none text-right tabular-nums opacity-50"
                 style={{ fontFamily: MONO_FONT, fontSize: 9.5 }}
               >
                 {rank}
