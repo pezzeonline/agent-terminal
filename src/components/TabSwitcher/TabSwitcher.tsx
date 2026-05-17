@@ -122,13 +122,18 @@ export function TabSwitcher() {
           <CommandEmpty className="py-8 text-sm opacity-60">
             No matching tabs.
           </CommandEmpty>
-          {filtered.map((row) => (
+          {filtered.map((row, idx) => (
             <CommandItem
               key={row.tabKey}
-              // cmdk uses `value` as the keyboard-nav identity. Use the
-              // tabKey alone (guaranteed unique) so duplicate label/project
-              // strings across projects don't collide.
-              value={row.tabKey}
+              // cmdk derives data-selected from a strict value-string match
+              // (state.value === item.value), so any two items sharing the
+              // same value collapse into one selection slot — Enter always
+              // fires the first match because cmdk's lookup uses
+              // querySelector('[data-selected=true]'). Prefix with the row
+              // index so the value is guaranteed unique even if a future
+              // change ever lets tabKey collide. onSelect uses a closure
+              // over `row` so the value itself is never dispatched.
+              value={`${idx}|${row.tabKey}`}
               onSelect={() => handleSelect(row)}
               className={cn(
                 // Layout: comfortably padded row, fixed-rhythm gap.
