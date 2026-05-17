@@ -16,6 +16,7 @@ import {
   CommandItem,
   CommandList,
 } from '@/components/ui/command'
+import { cn } from '@/lib/utils'
 import { Keys, Mod } from '@/modules/keymap/keys'
 import {
   $activeProjectId,
@@ -113,8 +114,10 @@ export function TabSwitcher() {
           value={query}
           onValueChange={setQuery}
         />
-        <CommandList>
-          <CommandEmpty>No matching tabs.</CommandEmpty>
+        <CommandList className="max-h-[440px] p-1.5">
+          <CommandEmpty className="py-8 text-sm opacity-60">
+            No matching tabs.
+          </CommandEmpty>
           {filtered.map((row) => (
             <CommandItem
               key={row.tabKey}
@@ -123,32 +126,60 @@ export function TabSwitcher() {
               // strings across projects don't collide.
               value={row.tabKey}
               onSelect={() => handleSelect(row)}
-              className={row.isCurrent ? 'opacity-60' : ''}
+              className={cn(
+                // Layout: comfortably padded row, fixed-rhythm gap.
+                'group/row relative my-0.5 flex items-center gap-3 px-3 py-2.5',
+                // Visible selected/hover state (cmdk sets data-selected
+                // on both keyboard nav and mouseover) — accent-soft is the
+                // colored 10-14% wash that pairs with the accent rail.
+                'data-[selected=true]:bg-[var(--accent-soft)]',
+                'data-[selected=true]:text-foreground',
+                // Left accent bar — invisible by default, accent when selected.
+                "before:absolute before:top-2 before:bottom-2 before:left-0 before:w-[3px] before:rounded-r before:bg-transparent before:content-['']",
+                'data-[selected=true]:before:bg-accent',
+                'before:transition-colors',
+                row.isCurrent && 'opacity-55',
+              )}
             >
-              <div className="flex w-full items-center gap-3">
-                <span
-                  aria-hidden="true"
-                  className="w-5 shrink-0 text-right tabular-nums opacity-50"
-                  style={{ fontFamily: MONO_FONT, fontSize: 10 }}
-                >
-                  {row.rank > 0 ? row.rank : ''}
-                </span>
+              {/* Rank — fixed-width column so digits line up across rows. */}
+              <span
+                aria-hidden="true"
+                className="w-5 shrink-0 text-right tabular-nums opacity-45 group-data-[selected=true]/row:opacity-80"
+                style={{ fontFamily: MONO_FONT, fontSize: 10.5 }}
+              >
+                {row.rank > 0 ? row.rank : ''}
+              </span>
+
+              {/* Status icon slot — fixed 16px square. AgentGlyph (14px)
+                  centres inside; dot icons sit centred too. Keeps the
+                  label column origin stable across icon types. */}
+              <div className="flex size-4 shrink-0 items-center justify-center">
                 <TabStatusIcon tabId={row.tabKey} active={row.isCurrent} />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-[12px]">
-                    {row.label}
-                    {row.isCurrent && (
-                      <span className="ml-2 opacity-50">(current)</span>
-                    )}
-                  </div>
-                  <div
-                    className="truncate text-[10.5px] opacity-60"
-                    style={{ fontFamily: MONO_FONT }}
-                  >
-                    {row.projectName}
-                    {row.cwd && ` · ${cwdBasename(row.cwd)}`}
-                    {` · ${formatRelativeTime(now, row.lastActiveAt)}`}
-                  </div>
+              </div>
+
+              {/* Label + meta — two lines, comfortable leading. */}
+              <div className="min-w-0 flex-1">
+                <div className="flex items-baseline gap-2 text-[13px] leading-snug">
+                  <span className="truncate">{row.label}</span>
+                  {row.isCurrent && (
+                    <span className="shrink-0 text-[10.5px] opacity-50">
+                      (current)
+                    </span>
+                  )}
+                </div>
+                <div
+                  className="mt-1 truncate text-[11px] leading-snug opacity-55"
+                  style={{ fontFamily: MONO_FONT }}
+                >
+                  <span className="opacity-90">{row.projectName}</span>
+                  {row.cwd && (
+                    <>
+                      <span className="opacity-50"> · </span>
+                      {cwdBasename(row.cwd)}
+                    </>
+                  )}
+                  <span className="opacity-50"> · </span>
+                  {formatRelativeTime(now, row.lastActiveAt)}
                 </div>
               </div>
             </CommandItem>
