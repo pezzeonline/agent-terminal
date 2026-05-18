@@ -90,7 +90,14 @@ export function removeProject(projectId: string): void {
   const project = projects.find((p) => p.id === projectId)
   if (project) {
     for (const tab of project.tabs) {
-      IPC.closeTab(makeTabKey(projectId, tab.id)).catch(() => {})
+      const tabKey = makeTabKey(projectId, tab.id)
+      IPC.closeTab(tabKey).catch(() => {})
+      // Symmetric with removeTab — otherwise the project's tabKeys
+      // linger in $tabRecency / localStorage as ghosts. They'd be
+      // filtered out of the palette's render but the surviving rows
+      // would still see their idx-based rank shifted up (rank 1 live
+      // tab appearing as rank 7 with 6 ghosts ahead of it).
+      forgetTabRecency(tabKey)
     }
   }
   const updated = projects.filter((p) => p.id !== projectId)
