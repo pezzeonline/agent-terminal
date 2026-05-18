@@ -66,7 +66,7 @@ Always-on context for the focused tab — refreshed every couple of seconds, nev
 Want support for another agent? [Open an issue](https://github.com/DaniAkash/agent-terminal/issues/new) or [tell me on X](https://x.com/dani_akash_).
 
 ### Find your way back
-When you're juggling many projects, it's easy to lose track of which tabs you were just in. `Cmd+P` opens a VS Code-style quick-switcher with every open tab in recency order, rank chips, a `Nm ago` timestamp, and case-insensitive substring search across label + project + cwd. Type a few letters, hit Enter, you're there. The recency is persisted to local storage so the order still makes sense after a quit-and-relaunch.
+`Cmd+P` opens a switcher for your recently used tabs — type a few letters, hit Enter, you're there.
 
 ### Keyboard shortcuts
 - `Ctrl+T` — new tab in the active project
