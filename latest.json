@@ -1,0 +1,15 @@
+{
+  "version": "0.1.4-rc.4",
+  "notes": "\n### Bug Fixes\n\n- Emit signed updater artifacts with arch-suffixed names (#61) (276e200)\n\n",
+  "pub_date": "2026-05-19T13:12:31Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTY0t3bmtjL1JxZGhSQnNUR01NNENGejE5ZG05dUlXMHUzOUVIRkxlNHhjYW4rY0VuYWZoQmcvZDV4TWFwSUwrRU14dWJBL0ZwR3dDSE9iYVdsc2VKWU93eHpoYlNoaUFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc5MTk2MzE2CWZpbGU6QWdlbnQgVGVybWluYWwuYXBwLnRhci5negpzOUk4Z2dXTkV2WHp0WVh4K1NYTk1XaHdMZUdnVUN0MW1TR2xHUWVCOTJmNk43Q3hQakN1eUNVWEtYLzdoOUxydURUMkhaWVJHekc4S1FLdWJWM3JBUT09Cg==",
+      "url": "https://github.com/DaniAkash/agent-terminal/releases/download/v0.1.4-rc.4/Agent Terminal_aarch64.app.tar.gz"
+    },
+    "darwin-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTY0t3bmtjL1JxZG9hZTRxZFd2NFMxZm1jZVhvbk5OZmJXU1NnVEY1dUhjRXVPWlNTb2lDNlg4OHdYRm9qZmUvVVowdU1zaVFraWJJRmQzb3k0V1FVTFZnd2RmcVpBZUFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc5MTk2MjUxCWZpbGU6QWdlbnQgVGVybWluYWwuYXBwLnRhci5negpiV09KT2E4bHZkd2FUNVUvdkJ0WUpkUjUyN1NLQVhyempBTjh6N2FOQVJtM3p5L2NHYXk5WkpWU25OYUNNK2tDa1gzaXgwMzRjRkNGaFI1U0wxVVFDQT09Cg==",
+      "url": "https://github.com/DaniAkash/agent-terminal/releases/download/v0.1.4-rc.4/Agent Terminal_x64.app.tar.gz"
+    }
+  }
+}
