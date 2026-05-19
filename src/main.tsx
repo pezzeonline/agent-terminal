@@ -8,16 +8,15 @@ import { syncNotificationsEnabledToBackend } from '@/modules/notifications/prefe
 import { initNavigation } from '@/modules/stores/$navigation'
 import { $projects } from '@/modules/stores/$projects'
 import { initTabRecencySubscriber } from '@/modules/stores/$tabRecency.init'
+import { initThemeFromStorage } from '@/modules/stores/$theme'
 import { WorkspaceLayout } from '@/screens/workspace/WorkspaceLayout'
 import type { Project } from '@/screens/workspace/workspace.types'
 import '@xterm/xterm/css/xterm.css'
 import './index.css'
 
 async function bootstrap() {
-  // Start MOD event listener before render so no events are missed.
   await startModListener()
 
-  // Debounced CWD write-back: persists tab.lastCwd on every directory change.
   startCwdPersist()
 
   try {
@@ -25,11 +24,10 @@ async function bootstrap() {
     if (saved.length > 0) {
       $projects.set(saved)
     }
-  } catch {
-    // No saved projects — start with empty state.
-  }
+  } catch {}
 
   initNavigation()
+  initThemeFromStorage()
 
   // Recency tracker subscribes to navigation; must run after initNavigation
   // so the first bump captures the project/tab restored from disk.
