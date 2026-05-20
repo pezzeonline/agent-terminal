@@ -172,6 +172,27 @@ jobs:
         with:
           args: --target ${{ matrix.target }}
 
+      - name: Add stable-named DMG copies
+        # The README pins its download badges to:
+        #   /releases/latest/download/agent-terminal-{aarch64,x64}.dmg
+        # That redirect resolves to the asset on whichever release is marked
+        # "Latest" — but only if the filename is stable across releases.
+        # The bundler-produced names (`Agent Terminal_0.1.4_aarch64.dmg`)
+        # change every version, so we ship side-by-side copies with
+        # versionless names. Keeps both audiences happy: the version-stamped
+        # download for the release page, the stable filename for the README.
+        run: |
+          set -euo pipefail
+          cd src-tauri/target/${{ matrix.target }}/release/bundle/dmg
+          case "${{ matrix.target }}" in
+            aarch64-apple-darwin) STABLE=agent-terminal-aarch64.dmg ;;
+            x86_64-apple-darwin)  STABLE=agent-terminal-x64.dmg ;;
+            *) echo "Unknown target ${{ matrix.target }}"; exit 1 ;;
+          esac
+          src=$(ls *.dmg | head -n 1)
+          cp -- "$src" "$STABLE"
+          ls -la
+
       - name: Suffix updater bundle with arch
         # Tauri appends `_aarch64` / `_x64` to DMG filenames automatically
         # but does NOT do the same for `.app.tar.gz` — both matrix entries
