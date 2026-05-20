@@ -1,15 +1,15 @@
 {
-  "version": "0.1.4-rc.4",
-  "notes": "\n### Bug Fixes\n\n- Emit signed updater artifacts with arch-suffixed names (#61) (276e200)\n\n",
-  "pub_date": "2026-05-19T13:12:31Z",
+  "version": "0.1.4",
+  "notes": "\n### Features\n\n- In-app update banner with launch + on-demand checks (#57) (1a1666f)\n\n",
+  "pub_date": "2026-05-20T02:24:02Z",
   "platforms": {
     "darwin-aarch64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTY0t3bmtjL1JxZGhSQnNUR01NNENGejE5ZG05dUlXMHUzOUVIRkxlNHhjYW4rY0VuYWZoQmcvZDV4TWFwSUwrRU14dWJBL0ZwR3dDSE9iYVdsc2VKWU93eHpoYlNoaUFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc5MTk2MzE2CWZpbGU6QWdlbnQgVGVybWluYWwuYXBwLnRhci5negpzOUk4Z2dXTkV2WHp0WVh4K1NYTk1XaHdMZUdnVUN0MW1TR2xHUWVCOTJmNk43Q3hQakN1eUNVWEtYLzdoOUxydURUMkhaWVJHekc4S1FLdWJWM3JBUT09Cg==",
-      "url": "https://github.com/DaniAkash/agent-terminal/releases/download/v0.1.4-rc.4/Agent Terminal_aarch64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTY0t3bmtjL1JxZHRHTUphb0RqM0l5UWl5UEpQdDMwWm1CL2w2TWdxYklrUDZMLzNXcTFVbXVPTno1ZHdQOUk2a2JJQysveUFHYXN1TWQ2QUNkOHBDUW1VMTN3YnkrbXdRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc5MjQzNjEzCWZpbGU6QWdlbnQgVGVybWluYWwuYXBwLnRhci5negpzdUZaQ1hoWS9BNUxHdW9vWW1KcmN3cUdoUDFiOUM5SGJiS1A1WHdJcVQzQjkwSlArN3ZsUTRWQzBac1hjSDFRczlUdDZpRTBQTFo1dkpFK0lVc0lEQT09Cg==",
+      "url": "https://github.com/DaniAkash/agent-terminal/releases/download/v0.1.4/Agent Terminal_aarch64.app.tar.gz"
     },
     "darwin-x86_64": {
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTY0t3bmtjL1JxZG9hZTRxZFd2NFMxZm1jZVhvbk5OZmJXU1NnVEY1dUhjRXVPWlNTb2lDNlg4OHdYRm9qZmUvVVowdU1zaVFraWJJRmQzb3k0V1FVTFZnd2RmcVpBZUFFPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc5MTk2MjUxCWZpbGU6QWdlbnQgVGVybWluYWwuYXBwLnRhci5negpiV09KT2E4bHZkd2FUNVUvdkJ0WUpkUjUyN1NLQVhyempBTjh6N2FOQVJtM3p5L2NHYXk5WkpWU25OYUNNK2tDa1gzaXgwMzRjRkNGaFI1U0wxVVFDQT09Cg==",
-      "url": "https://github.com/DaniAkash/agent-terminal/releases/download/v0.1.4-rc.4/Agent Terminal_x64.app.tar.gz"
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTY0t3bmtjL1JxZHB6M1h5VGtPZmZYOHVEay9OanRGMmcxNUFzNDhTclJPMEpLUmNlRG96cXNWRDRDNk9rcGg5WitQU1hUZG5odWliWUpjakczMVN4YWZDZnRydDY4dndJPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzc5MjQzODA5CWZpbGU6QWdlbnQgVGVybWluYWwuYXBwLnRhci5negoxN2xKSzlpaEZTbUVZOXVSalhQbERXK1ZzS3A4Snl1VFVUcTJLam9xM1hSc05tbFFNWEtIazVuWWM5cE1rRmhlWVV6YTVYNkFGc3AySFRlVFhsOUxEUT09Cg==",
+      "url": "https://github.com/DaniAkash/agent-terminal/releases/download/v0.1.4/Agent Terminal_x64.app.tar.gz"
     }
   }
 }
