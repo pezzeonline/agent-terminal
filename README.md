@@ -7,8 +7,14 @@
 
   [![Latest release](https://img.shields.io/github/v/release/DaniAkash/agent-terminal?include_prereleases&label=latest&color=blue)](https://github.com/DaniAkash/agent-terminal/releases)
   [![Status](https://img.shields.io/badge/status-pre--alpha-orange)](#status)
-  [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)](#download)
+  [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)](https://github.com/DaniAkash/agent-terminal/releases)
 </div>
+
+<p align="center">
+  <a href="https://github.com/DaniAkash/agent-terminal/releases/latest/download/agent-terminal-aarch64.dmg"><img src="https://img.shields.io/badge/Download_for-Apple%20Silicon-000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for Apple Silicon"></a>
+  &nbsp;
+  <a href="https://github.com/DaniAkash/agent-terminal/releases/latest/download/agent-terminal-x64.dmg"><img src="https://img.shields.io/badge/Download_for-Intel-0071C5?style=for-the-badge&logo=intel&logoColor=white" alt="Download for Intel"></a>
+</p>
 
 <p align="center">
   <a href="https://www.producthunt.com/products/agent-terminal?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-agent-terminal" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1136595&theme=light&t=1777623264721" alt="Agent terminal - One terminal. Every agent. Total clarity. | Product Hunt" width="250" height="54" /></a>
@@ -27,26 +33,6 @@ If you live in a terminal alongside [Claude Code](https://claude.ai/code), [Code
 Agent Terminal is a terminal that knows the difference between a shell and an agent. It groups your tabs by project, recognises when an agent is running, and surfaces what's happening — the model in use, what's listening on which port, the git branch, your cwd — without you switching windows or running `ps`.
 
 ![Agent Terminal screenshot](./docs/assets/screenshot.png)
-
----
-
-## Download
-
-<p align="center">
-  <a href="https://github.com/DaniAkash/agent-terminal/releases/latest/download/agent-terminal-aarch64.dmg"><img src="https://img.shields.io/badge/Download_for-Apple%20Silicon-000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for Apple Silicon"></a>
-  &nbsp;
-  <a href="https://github.com/DaniAkash/agent-terminal/releases/latest/download/agent-terminal-x64.dmg"><img src="https://img.shields.io/badge/Download_for-Intel-0071C5?style=for-the-badge&logo=intel&logoColor=white" alt="Download for Intel"></a>
-</p>
-
-Both badges always link to the current release — no version juggling. Full version history on the [releases page](https://github.com/DaniAkash/agent-terminal/releases).
-
-Not sure which? Click the Apple menu → About This Mac. "Chip: Apple M…" means Apple Silicon; "Processor: Intel…" means Intel.
-
-1. Download the matching `.dmg`.
-2. Open it, drag **Agent Terminal** to your Applications folder.
-3. Launch.
-
-That's it. No config files, no daemons, no tmux setup. Future updates arrive in-app — no manual downloads after the first install. Use **Agent Terminal → Check for Updates…** in the menu bar to force a check anytime.
 
 ---
 
