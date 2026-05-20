@@ -32,11 +32,13 @@ Agent Terminal is a terminal that knows the difference between a shell and an ag
 
 ## Download
 
-Pick the `.dmg` that matches your Mac on the [releases page](https://github.com/DaniAkash/agent-terminal/releases):
+<p align="center">
+  <a href="https://github.com/DaniAkash/agent-terminal/releases/latest/download/agent-terminal-aarch64.dmg"><img src="https://img.shields.io/badge/Download_for-Apple%20Silicon-000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for Apple Silicon"></a>
+  &nbsp;
+  <a href="https://github.com/DaniAkash/agent-terminal/releases/latest/download/agent-terminal-x64.dmg"><img src="https://img.shields.io/badge/Download_for-Intel-0071C5?style=for-the-badge&logo=intel&logoColor=white" alt="Download for Intel"></a>
+</p>
 
-| Apple Silicon (M1 / M2 / M3 / M4) | Intel |
-| --- | --- |
-| `agent-terminal_<version>_aarch64.dmg` | `agent-terminal_<version>_x64.dmg` |
+Both badges always link to the current release — no version juggling. Full version history on the [releases page](https://github.com/DaniAkash/agent-terminal/releases).
 
 Not sure which? Click the Apple menu → About This Mac. "Chip: Apple M…" means Apple Silicon; "Processor: Intel…" means Intel.
 
@@ -44,7 +46,7 @@ Not sure which? Click the Apple menu → About This Mac. "Chip: Apple M…" mean
 2. Open it, drag **Agent Terminal** to your Applications folder.
 3. Launch.
 
-That's it. No config files, no daemons, no tmux setup.
+That's it. No config files, no daemons, no tmux setup. Future updates arrive in-app — no manual downloads after the first install. Use **Agent Terminal → Check for Updates…** in the menu bar to force a check anytime.
 
 ---
 
