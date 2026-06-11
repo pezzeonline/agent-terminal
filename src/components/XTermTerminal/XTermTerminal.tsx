@@ -301,10 +301,12 @@ export const XTermTerminal = React.memo(function XTermTerminal({
     if (!lifecycle) return
     if (isActive) {
       lifecycle.enableWebgl()
-      // Even if WebGL was already enabled (idempotent path), force a
-      // refresh — the pane may have been hidden long enough for atlas
-      // pages to merge, and a refresh re-resolves stale cell slots.
-      termRef.current?.refresh(0, Math.max(0, (termRef.current?.rows ?? 1) - 1))
+      // Idempotent path skips refresh inside the helper; redo it here so
+      // an already-enabled pane that's been hidden long enough for atlas
+      // merge gets a clean re-render. Rows-guard matches the theme +
+      // font-size sites in this file.
+      const term = termRef.current
+      if (term && term.rows > 0) term.refresh(0, term.rows - 1)
     } else {
       lifecycle.disableWebgl()
     }
