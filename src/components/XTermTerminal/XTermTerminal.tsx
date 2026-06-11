@@ -2,11 +2,14 @@ import { useStore } from '@nanostores/react'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import { FitAddon } from '@xterm/addon-fit'
 import { SearchAddon } from '@xterm/addon-search'
-import { Unicode11Addon } from '@xterm/addon-unicode11'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal } from '@xterm/xterm'
 import React, { useEffect, useRef } from 'react'
+import {
+  createWebglLifecycle,
+  type WebglLifecycle,
+} from '@/components/XTermTerminal/xterm-terminal.webgl'
 import { $activeSearch } from '@/modules/stores/$activeSearch'
 import { $fontSize } from '@/modules/stores/$fontSize'
 
@@ -62,6 +65,13 @@ type Props = {
    * tabs those chords pass through unchanged.
    */
   isAgent: boolean
+  /**
+   * True when the pane is the visible one. WebGL rendering is scoped to
+   * the active pane so the per-page WebGL context count stays at 1
+   * regardless of how many tabs the user has visited (hidden panes use
+   * the DOM renderer, which is invisible anyway).
+   */
+  isActive: boolean
   className?: string
 }
 
@@ -92,28 +102,33 @@ export const XTermTerminal = React.memo(function XTermTerminal({
   onData,
   onResize,
   isAgent,
+  isActive,
   className,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
   const searchAddonRef = useRef<SearchAddon | null>(null)
+  const webglLifecycleRef = useRef<WebglLifecycle | null>(null)
   const fontSize = useStore($fontSize)
 
-  // Keep callbacks (and the agent flag) in refs so the mount-once effect
-  // always sees the latest versions without needing to re-run when they
-  // change reference. The custom key handler reads `isAgentRef.current`
-  // so toggling agent state mid-session reflects on the next keypress.
+  // Keep callbacks + flags in refs so the mount-once effect always sees
+  // the latest versions without needing to re-run when they change
+  // reference. `isActiveRef` is read by the WebGL lifecycle's
+  // microtask-deferred retry to bail out if the pane was deactivated
+  // between context loss and retry firing.
   const onReadyRef = useRef(onReady)
   const onDataRef = useRef(onData)
   const onResizeRef = useRef(onResize)
   const isAgentRef = useRef(isAgent)
+  const isActiveRef = useRef(isActive)
   useEffect(() => {
     onReadyRef.current = onReady
     onDataRef.current = onData
     onResizeRef.current = onResize
     isAgentRef.current = isAgent
-  }, [onReady, onData, onResize, isAgent])
+    isActiveRef.current = isActive
+  }, [onReady, onData, onResize, isAgent, isActive])
 
   useEffect(() => {
     const container = containerRef.current
@@ -121,7 +136,6 @@ export const XTermTerminal = React.memo(function XTermTerminal({
     let disposed = false
     let resizeObserver: ResizeObserver | null = null
     let fitTimer: ReturnType<typeof setTimeout> | null = null
-    let webglAddon: WebglAddon | null = null
 
     const darkMq = window.matchMedia('(prefers-color-scheme: dark)')
 
@@ -141,7 +155,6 @@ export const XTermTerminal = React.memo(function XTermTerminal({
     })
 
     const fitAddon = new FitAddon()
-    const unicode11Addon = new Unicode11Addon()
     const searchAddon = new SearchAddon()
     // Custom click handler — the addon's default calls window.open(), which
     // inside Tauri's webview either no-ops or hijacks the app window. Route
@@ -151,13 +164,9 @@ export const XTermTerminal = React.memo(function XTermTerminal({
     })
 
     term.loadAddon(fitAddon)
-    term.loadAddon(unicode11Addon)
     term.loadAddon(searchAddon)
     term.loadAddon(webLinksAddon)
     term.open(container)
-
-    // Activate Unicode 11 after open() per addon docs.
-    term.unicode.activeVersion = '11'
 
     termRef.current = term
     fitAddonRef.current = fitAddon
@@ -176,20 +185,17 @@ export const XTermTerminal = React.memo(function XTermTerminal({
       }),
     )
 
-    // WebGL renderer — falls back to xterm's built-in DOM renderer on context
-    // loss. The canvas addon is not used: it is v5-only and was removed in v6.
-    try {
-      webglAddon = new WebglAddon()
-      webglAddon.onContextLoss(() => {
-        webglAddon?.dispose()
-        webglAddon = null
-        // xterm DOM renderer takes over automatically after WebGL is disposed.
-      })
-      term.loadAddon(webglAddon)
-    } catch {
-      // WebGL2 not available — xterm DOM renderer takes over automatically.
-      webglAddon = null
-    }
+    // WebGL renderer is scoped to the active pane and managed by the
+    // lifecycle helper — see xterm-terminal.webgl.ts for the rationale
+    // (one live context per page max; explicit refresh on every renderer
+    // transition; bounded retry on context loss).
+    const webglLifecycle = createWebglLifecycle({
+      term,
+      createAddon: () => new WebglAddon(),
+      isActive: () => isActiveRef.current,
+    })
+    webglLifecycleRef.current = webglLifecycle
+    if (isActiveRef.current) webglLifecycle.enableWebgl()
 
     // Single source of theme updates: the MutationObserver watches
     // `data-theme` on <html>. Both flows route through it —
@@ -272,10 +278,10 @@ export const XTermTerminal = React.memo(function XTermTerminal({
       resizeObserver?.disconnect()
       dataDisposable.dispose()
       resizeDisposable.dispose()
-      webglAddon?.dispose()
+      webglLifecycle.dispose()
+      webglLifecycleRef.current = null
       searchAddon.dispose()
       fitAddon.dispose()
-      unicode11Addon.dispose()
       webLinksAddon.dispose()
       term.dispose()
       termRef.current = null
@@ -284,14 +290,40 @@ export const XTermTerminal = React.memo(function XTermTerminal({
     }
   }, []) // mount once — callbacks are accessed via stable refs
 
+  // Toggle WebGL on / off when the pane's activity state flips. Only
+  // the visible pane gets a live WebGL context — caps total contexts at
+  // 1 regardless of how many tabs the user has visited. The DOM
+  // renderer handles inactive panes (they're CSS-hidden, so visual
+  // fidelity doesn't matter). refresh() inside the lifecycle helpers
+  // guarantees the renderer that takes over paints the actual buffer.
+  useEffect(() => {
+    const lifecycle = webglLifecycleRef.current
+    if (!lifecycle) return
+    if (isActive) {
+      lifecycle.enableWebgl()
+      // Even if WebGL was already enabled (idempotent path), force a
+      // refresh — the pane may have been hidden long enough for atlas
+      // pages to merge, and a refresh re-resolves stale cell slots.
+      termRef.current?.refresh(0, Math.max(0, (termRef.current?.rows ?? 1) - 1))
+    } else {
+      lifecycle.disableWebgl()
+    }
+  }, [isActive])
+
   // React to font-size changes globally. Defer fit() so the canvas
-  // re-rasterizes glyphs at the new size before recomputing cols/rows.
+  // re-rasterizes glyphs at the new size before recomputing cols/rows;
+  // refresh after fit because the old-size glyphs still occupy atlas
+  // slots that the visible buffer's cells point at — refresh re-resolves
+  // them at the new size.
   useEffect(() => {
     const term = termRef.current
     const fit = fitAddonRef.current
     if (!term || !fit) return
     term.options.fontSize = fontSize
-    requestAnimationFrame(() => fit.fit())
+    requestAnimationFrame(() => {
+      fit.fit()
+      if (term.rows > 0) term.refresh(0, term.rows - 1)
+    })
   }, [fontSize])
 
   return (
