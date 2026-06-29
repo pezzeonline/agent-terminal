@@ -10,6 +10,9 @@ mod mod_engine;
 mod notifications;
 mod pty_manager;
 mod shell_integration;
+// pub so integration tests can drive a SidecarClient instance directly
+// without going through the full Tauri startup path.
+pub mod sidecar_client;
 
 use hook_config::ensure_hooks_installed;
 use hook_server::start_hook_server;
@@ -35,8 +38,62 @@ use tauri::menu::{MenuBuilder, SubmenuBuilder};
 #[cfg(all(target_os = "macos", not(feature = "dev-instance")))]
 use tauri::menu::MenuItemBuilder;
 use pty_manager::PtyMap;
+use sidecar_client::SidecarClient;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tokio::process::Command;
+
+/// Locate the runtime binary + sidecar entry script. Dev launches read from
+/// the source tree via CARGO_MANIFEST_DIR; production bundling is a separate
+/// follow-up (Tauri externalBin + a bundled Node binary). Returns None when
+/// either piece is missing so startup degrades to "no sidecar" gracefully.
+fn resolve_sidecar_paths() -> Option<(PathBuf, PathBuf)> {
+    // Prefer node; fall back to bun (compatible enough for the JSON-RPC loop
+    // + @xterm/headless). Whichever is present on PATH wins.
+    let runtime = which::which("node")
+        .or_else(|_| which::which("bun"))
+        .ok()?;
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let script = PathBuf::from(manifest_dir).join("sidecar").join("index.js");
+    if !script.exists() {
+        return None;
+    }
+    Some((runtime, script))
+}
+
+/// Spawn the headless-xterm sidecar. Returns None on any failure (missing
+/// runtime, missing script, spawn error). The desktop continues running
+/// without it; the sidecar is only consumed by the upcoming StreamHub +
+/// WSS server modules.
+async fn try_spawn_sidecar() -> Option<SidecarClient> {
+    let (runtime, script) = match resolve_sidecar_paths() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "[sidecar] disabled: node/bun not on PATH or sidecar/index.js missing — \
+                 remote-attach features will be unavailable until the sidecar is bundled"
+            );
+            return None;
+        }
+    };
+    let mut cmd = Command::new(&runtime);
+    cmd.arg(&script);
+    match SidecarClient::spawn(cmd).await {
+        Ok(c) => {
+            eprintln!(
+                "[sidecar] spawned via {} {}",
+                runtime.display(),
+                script.display()
+            );
+            Some(c)
+        }
+        Err(e) => {
+            eprintln!("[sidecar] spawn failed: {e}");
+            None
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -137,6 +194,15 @@ pub fn run() {
 
             let mod_engine = engine_builder.build(app.handle().clone());
             app.manage(mod_engine);
+
+            // Headless-xterm sidecar. Spawned as best-effort so a missing
+            // node/bun runtime or a not-yet-bundled script never blocks the
+            // desktop from launching. Consumers (StreamHub, WSS server)
+            // check app.try_state::<Arc<SidecarClient>>() and degrade
+            // gracefully when None.
+            if let Some(client) = tauri::async_runtime::block_on(try_spawn_sidecar()) {
+                app.manage(Arc::new(client));
+            }
 
             // Window focus → suppression signal only.
             // (The previous focus-event-based click heuristic is gone — it

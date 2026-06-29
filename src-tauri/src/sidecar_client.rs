@@ -1,0 +1,392 @@
+// Sidecar client — Rust ↔ Node JSON-RPC over stdio.
+//
+// One long-lived child process holds N headless xterm instances. This module
+// owns the child handle, the per-line framing, the request-id allocator, and
+// the pending-reply table. Every public method is cancel-safe across
+// `tokio::select!`: dropping the future before its reply arrives drops the
+// matching oneshot Receiver only; the pending slot releases when the reply
+// lands and is silently discarded.
+//
+// stdout is the JSON-RPC channel (newline-delimited JSON, one message per
+// line). stderr is forwarded to the host's stderr with a `[sidecar]` prefix
+// for debugging without polluting the protocol.
+//
+// `write_bytes` is fire-and-forget: it pushes one line onto the writer mpsc
+// and returns. `open` / `resize` / `serialize` / `close` await a reply
+// keyed by the request id.
+
+use std::collections::HashMap;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
+use serde_json::{Value, json};
+use thiserror::Error;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::Command;
+use tokio::sync::{Mutex, mpsc, oneshot};
+
+#[derive(Debug, Error)]
+pub enum SidecarError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("sidecar replied with error: {0}")]
+    Remote(String),
+    #[error("sidecar process died")]
+    Dead,
+    #[error("invalid reply: {0}")]
+    InvalidReply(String),
+}
+
+pub type Result<T> = std::result::Result<T, SidecarError>;
+
+type PendingMap = Mutex<HashMap<u64, oneshot::Sender<Value>>>;
+
+/// Client handle. Cloneable: every clone shares the same child process and
+/// pending-reply table. The child is reaped when the last clone is dropped
+/// and the writer mpsc closes (stdin EOF → sidecar's `rl.on('close')` runs
+/// `process.exit(0)`).
+#[derive(Clone)]
+pub struct SidecarClient {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    next_id: AtomicU64,
+    pending: Arc<PendingMap>,
+    writer_tx: mpsc::UnboundedSender<String>,
+    dead: Arc<AtomicBool>,
+}
+
+impl SidecarClient {
+    /// Spawn the sidecar from a prepared `tokio::process::Command`. The
+    /// caller owns runtime + script discovery so dev and bundled-prod can
+    /// build their own Commands without changing this module. Stdin /
+    /// stdout / stderr are forced to piped regardless of what the caller
+    /// configured.
+    pub async fn spawn(mut cmd: Command) -> Result<Self> {
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = cmd.spawn()?;
+        let stdin = child.stdin.take().expect("piped above");
+        let stdout = child.stdout.take().expect("piped above");
+        let stderr = child.stderr.take().expect("piped above");
+
+        let pending: Arc<PendingMap> = Arc::new(Mutex::new(HashMap::new()));
+        let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<String>();
+        let dead = Arc::new(AtomicBool::new(false));
+
+        // Writer task — owns stdin. Serialises writes so concurrent callers
+        // can't interleave bytes mid-line.
+        {
+            let dead = Arc::clone(&dead);
+            tokio::spawn(async move {
+                let mut stdin = stdin;
+                while let Some(msg) = writer_rx.recv().await {
+                    if stdin.write_all(msg.as_bytes()).await.is_err()
+                        || stdin.write_all(b"\n").await.is_err()
+                        || stdin.flush().await.is_err()
+                    {
+                        dead.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+            });
+        }
+
+        // Stdout reader — parses one JSON line at a time, dispatches by
+        // `id` to the matching pending oneshot.
+        {
+            let pending = Arc::clone(&pending);
+            tokio::spawn(async move {
+                let mut lines = BufReader::new(stdout).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let value: Value = match serde_json::from_str(trimmed) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("[sidecar] bad json on stdout: {e}: {trimmed}");
+                            continue;
+                        }
+                    };
+                    if let Some(id) = value.get("id").and_then(Value::as_u64) {
+                        let mut map = pending.lock().await;
+                        if let Some(tx) = map.remove(&id) {
+                            // Receiver dropped (cancelled future) is fine —
+                            // silently drop the reply.
+                            let _ = tx.send(value);
+                        }
+                    }
+                }
+            });
+        }
+
+        // Stderr forwarder — prefixed for grep-ability in the host log.
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                eprintln!("[sidecar] {line}");
+            }
+        });
+
+        // Reaper — when the child exits, mark dead and drop every still-
+        // pending Sender so awaiting callers see SidecarError::Dead promptly
+        // instead of hanging forever.
+        {
+            let pending = Arc::clone(&pending);
+            let dead = Arc::clone(&dead);
+            tokio::spawn(async move {
+                let status = child.wait().await;
+                dead.store(true, Ordering::Release);
+                eprintln!("[sidecar] process exited: {status:?}");
+                let mut map = pending.lock().await;
+                map.clear();
+            });
+        }
+
+        Ok(Self {
+            inner: Arc::new(Inner {
+                next_id: AtomicU64::new(1),
+                pending,
+                writer_tx,
+                dead,
+            }),
+        })
+    }
+
+    /// Returns true once the child has exited or any stdin write has failed.
+    /// Public so callers can choose between retry / restart strategies.
+    pub fn is_dead(&self) -> bool {
+        self.inner.dead.load(Ordering::Acquire)
+    }
+
+    async fn call(&self, verb: &str, args: Value) -> Result<Value> {
+        if self.is_dead() {
+            return Err(SidecarError::Dead);
+        }
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.inner.pending.lock().await.insert(id, tx);
+        let line = json!({ "id": id, "verb": verb, "args": args }).to_string();
+        if self.inner.writer_tx.send(line).is_err() {
+            // Writer task gone. Drop our pending slot so it doesn't leak.
+            self.inner.pending.lock().await.remove(&id);
+            return Err(SidecarError::Dead);
+        }
+        match rx.await {
+            Ok(reply) => match reply.get("ok").and_then(Value::as_bool) {
+                Some(true) => Ok(reply),
+                _ => {
+                    let msg = reply
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    Err(SidecarError::Remote(msg))
+                }
+            },
+            Err(_) => Err(SidecarError::Dead),
+        }
+    }
+
+    pub async fn open(&self, tab_id: &str, cols: u16, rows: u16) -> Result<()> {
+        self.call(
+            "open",
+            json!({ "tab_id": tab_id, "cols": cols, "rows": rows }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Push raw PTY bytes to the sidecar's parser for `tab_id`. Returns
+    /// immediately — there is no reply. If the sidecar has died, the bytes
+    /// silently drop; the caller's hot path stays branch-free.
+    pub fn write_bytes(&self, tab_id: &str, bytes: &[u8]) {
+        if self.is_dead() {
+            return;
+        }
+        let bytes_b64 = B64.encode(bytes);
+        let line = json!({
+            "verb": "write",
+            "args": { "tab_id": tab_id, "bytes_b64": bytes_b64 }
+        })
+        .to_string();
+        let _ = self.inner.writer_tx.send(line);
+    }
+
+    pub async fn resize(&self, tab_id: &str, cols: u16, rows: u16) -> Result<()> {
+        self.call(
+            "resize",
+            json!({ "tab_id": tab_id, "cols": cols, "rows": rows }),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Ask the sidecar to serialize tab_id's buffer. Returns the xterm-
+    /// serialize payload (a string containing escape sequences ready to
+    /// replay into a fresh xterm Terminal).
+    pub async fn serialize(&self, tab_id: &str, scrollback: u32) -> Result<String> {
+        let reply = self
+            .call(
+                "serialize",
+                json!({ "tab_id": tab_id, "scrollback": scrollback }),
+            )
+            .await?;
+        reply
+            .get("payload")
+            .and_then(Value::as_str)
+            .map(String::from)
+            .ok_or_else(|| SidecarError::InvalidReply("missing payload field".to_string()))
+    }
+
+    pub async fn close(&self, tab_id: &str) -> Result<()> {
+        self.call("close", json!({ "tab_id": tab_id })).await?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::{Duration, timeout};
+
+    // Fast helper: a "yes/echo" sidecar implemented in bun. Reads JSON lines,
+    // for each line with an id field writes back `{id, ok: true, payload:""}`
+    // so `serialize` calls return a non-null payload and other calls succeed.
+    // No actual xterm — pure protocol fidelity check.
+    fn echo_sidecar_command() -> Command {
+        let mut cmd = Command::new("bun");
+        // -e expression: avoids needing a temp file. Bun supports `bun -e`.
+        cmd.arg("-e")
+            .arg(
+                r#"
+                const rl = require('node:readline').createInterface({ input: process.stdin });
+                rl.on('line', (line) => {
+                    try {
+                        const m = JSON.parse(line);
+                        if (m.id != null) {
+                            process.stdout.write(JSON.stringify({ id: m.id, ok: true, payload: '' }) + '\n');
+                        }
+                    } catch {}
+                });
+                rl.on('close', () => process.exit(0));
+                process.stderr.write('[echo-sidecar] ready\n');
+                "#,
+            );
+        cmd
+    }
+
+    #[tokio::test]
+    async fn open_resize_close_roundtrip() {
+        let client = SidecarClient::spawn(echo_sidecar_command()).await.unwrap();
+        timeout(Duration::from_secs(5), client.open("t1", 80, 24))
+            .await
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(5), client.resize("t1", 132, 40))
+            .await
+            .unwrap()
+            .unwrap();
+        timeout(Duration::from_secs(5), client.close("t1"))
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn write_bytes_is_fire_and_forget() {
+        let client = SidecarClient::spawn(echo_sidecar_command()).await.unwrap();
+        // Spam writes; the call returns immediately even if the sidecar is
+        // slow to process. Mostly a sanity check that the API does not
+        // accidentally become blocking.
+        for _ in 0..1000 {
+            client.write_bytes("t1", b"hello");
+        }
+        // The echo sidecar emits no reply for `write`. Sleep briefly to
+        // confirm no spurious reply arrives that would corrupt later state.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_calls_get_distinct_ids() {
+        let client = SidecarClient::spawn(echo_sidecar_command()).await.unwrap();
+        let handles: Vec<_> = (0..50)
+            .map(|i| {
+                let c = client.clone();
+                tokio::spawn(async move { c.open(&format!("tab-{i}"), 80, 24).await })
+            })
+            .collect();
+        for h in handles {
+            h.await.unwrap().expect("each open should succeed");
+        }
+    }
+
+    /// End-to-end test against the real `sidecar/index.js`. Requires bun
+    /// (or node) on PATH and `src-tauri/sidecar/node_modules/` populated.
+    /// Marked `#[ignore]` so `cargo test --lib` (the CI default) skips it;
+    /// run with `cargo test --lib -- --ignored` locally to exercise.
+    #[tokio::test]
+    #[ignore = "requires src-tauri/sidecar/node_modules — run with `cargo test --lib -- --ignored`"]
+    async fn real_sidecar_open_write_serialize_close() {
+        let runtime = which::which("bun")
+            .or_else(|_| which::which("node"))
+            .expect("bun or node on PATH");
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let script = std::path::PathBuf::from(manifest_dir)
+            .join("sidecar")
+            .join("index.js");
+        assert!(
+            script.exists(),
+            "sidecar script missing at {} — did you `cd src-tauri/sidecar && bun install`?",
+            script.display()
+        );
+
+        let mut cmd = Command::new(&runtime);
+        cmd.arg(&script);
+        let client = SidecarClient::spawn(cmd).await.expect("spawn");
+
+        client.open("tab-1", 80, 24).await.expect("open");
+        client.write_bytes("tab-1", b"hello world\r\n");
+
+        let payload = timeout(
+            Duration::from_secs(10),
+            client.serialize("tab-1", 1000),
+        )
+        .await
+        .expect("serialize did not time out")
+        .expect("serialize ok");
+
+        assert!(
+            payload.contains("hello world"),
+            "serialize payload did not contain written text. payload: {payload}"
+        );
+
+        client.close("tab-1").await.expect("close");
+    }
+
+    #[tokio::test]
+    async fn dead_after_spawn_failure_returns_clear_error() {
+        // Spawn a process that exits immediately. Subsequent calls should
+        // observe SidecarError::Dead (via the reaper task setting dead=true
+        // and the pending map being cleared).
+        let cmd = Command::new("true");
+        let client = SidecarClient::spawn(cmd).await.unwrap();
+
+        // Give the reaper a moment to fire.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(client.is_dead());
+
+        let err = client.open("t1", 80, 24).await.unwrap_err();
+        assert!(
+            matches!(err, SidecarError::Dead),
+            "expected Dead, got {err:?}"
+        );
+    }
+}

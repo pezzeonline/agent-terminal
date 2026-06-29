@@ -55,4 +55,15 @@ axum = "0.8"
 dirs = "5"
 encoding_rs = "0.8"
 sysinfo = "0.33"
+# Base64 of raw PTY bytes for the sidecar's JSON-RPC channel. JSON can't carry
+# arbitrary binary cleanly, so every `write` op encodes the chunk and the
+# sidecar decodes on receipt.
+base64 = "0.22"
+# Structured errors for the sidecar client. Keeps the call sites (`?`-able)
+# tight without hand-rolling Display/source plumbing.
+thiserror = "2"
+# PATH walk for the bundled-Node fallback at runtime. Production builds will
+# eventually carry a Node binary inside the .app bundle; until then, dev
+# launches look the runtime up from the system.
+which = "8"
 
