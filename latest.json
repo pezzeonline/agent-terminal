@@ -5,11 +5,11 @@
   "platforms": {
     "darwin-aarch64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTY0t3bmtjL1JxZG5ZSU02TjdwNzEyRTFrRDkrYlc1cUZEdit2dGZoNDBLdWUxRDAwUGZ6Qm0rTUw5OVE3WndUa2pPVzBZb1BDM3FhdG9kSXA1ZThUR3pWalQvSkF0elFRPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyNzEwOTY3CWZpbGU6QWdlbnQgVGVybWluYWwuYXBwLnRhci5negpWcGsrQ2hqaUJKa05qbXJmNWkwV2tVQll2WFlnVE96OWZiQ1ZYR2oxUTRlam9tQVdPQ1E5TkU5NnA2bTYrVTBSUklzSGVpTWcxMUtIcWtDdmFpTWxEdz09Cg==",
-      "url": "https://github.com/DaniAkash/agent-terminal/releases/download/v0.1.5/Agent Terminal_aarch64.app.tar.gz"
+      "url": "https://github.com/DaniAkash/agent-terminal/releases/download/v0.1.5/Agent.Terminal_aarch64.app.tar.gz"
     },
     "darwin-x86_64": {
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTY0t3bmtjL1JxZGo1TEovYnhOWUNlY2FWZTBTNGZsODNHb2YwVVBhNFNBaEo3cGdORVVBSHZmaWw1TXJ4a3dnUFVlUXUxdWsxNVBCZ2FzOVdZN3hmR1ZYZTYvZXVZakEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzgyNzExMzgyCWZpbGU6QWdlbnQgVGVybWluYWwuYXBwLnRhci5negpSUGViRTVNSDcvQ1pQc1R4K3Fuc2RSdmhHejV1TEpyU2tKM0g1TVY3a1VKTElteVlZM1g5UGhPRUdwcCtXZTNxb1Z6MktGMWtnanl5b0w3eEY4WnJDQT09Cg==",
-      "url": "https://github.com/DaniAkash/agent-terminal/releases/download/v0.1.5/Agent Terminal_x64.app.tar.gz"
+      "url": "https://github.com/DaniAkash/agent-terminal/releases/download/v0.1.5/Agent.Terminal_x64.app.tar.gz"
     }
   }
 }
