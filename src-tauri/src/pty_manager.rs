@@ -521,13 +521,17 @@ pub fn spawn_pty(
         },
     );
 
-    // Wire the hub: register the local channel as a subscriber and tell
-    // the sidecar to open a matching shadow xterm. Both are idempotent
-    // for this tab id (subsequent re-spawns on the same tab leave the
-    // existing subscriber alone; ensure_tab is a no-op if state already
-    // exists). The sidecar.open call fires into the runtime, so spawn_pty
-    // stays sync. Strict order with subsequent broadcasts is preserved by
-    // the single mpsc inside SidecarClient.
+    // Reset any stale hub state for this tab id before wiring the new
+    // session. spawn_pty runs when try_reattach returned NotFound or
+    // Expired — for Expired, the previous session left a TabState with
+    // its own seq counter, ring entries, and (potentially) a
+    // disconnected SharedChannel still in the subscriber list. Carrying
+    // those into the new PTY would silently leak subscribers and break
+    // remote-resume sequence math once remote subscribers exist.
+    //
+    // close_tab is a no-op for the NotFound case, so this is safe to
+    // run unconditionally.
+    hub.close_tab(&tab_id);
     hub.ensure_tab(&tab_id, 80, 24);
     hub.subscribe_local(&tab_id, channel.clone());
 

@@ -51,14 +51,17 @@ pub const DEFAULT_RING_CAP_BYTES: usize = 512 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SubscriberId(u64);
 
+/// Per-tab fan-out target. `#[non_exhaustive]` so adding the upcoming
+/// `Remote` variant for paired mobile clients does not break any external
+/// matcher — and matches the intent expressed in the master architecture
+/// plan that subscribers grow over the phases.
+#[non_exhaustive]
 pub enum Subscriber {
     /// Desktop WebView path. The SharedChannel inside flips between
     /// `Some(channel)` and `None` as the WebView connects and reconnects
     /// without ever re-subscribing — same shape pty_manager has used since
     /// before the hub existed.
     Local(SharedChannel),
-    // Subscriber::Remote arrives when the WSS server is wired in; this
-    // enum is non-exhaustive on purpose for that growth.
 }
 
 struct TabState {
@@ -136,25 +139,19 @@ impl StreamHub {
     }
 
     /// Create per-tab state (idempotent) and tell the sidecar to open a
-    /// matching headless xterm. Returns immediately; the sidecar open is
-    /// fired into the tokio runtime so the synchronous spawn_pty caller
-    /// doesn't have to be made async.
-    ///
-    /// Strict ordering with subsequent `broadcast` calls is preserved by
-    /// the single mpsc inside the SidecarClient: the `open` line lands on
-    /// the writer queue before any `write` line that follows.
+    /// matching headless xterm. Fully synchronous — the sidecar `open`
+    /// line lands on the writer mpsc before this call returns, so any
+    /// subsequent `broadcast` from the same thread is guaranteed to push
+    /// its `write` line after the `open`. The previous version spawned
+    /// the open as a tokio task, which broke that ordering whenever the
+    /// reader thread raced ahead of the runtime scheduler.
     pub fn ensure_tab(&self, tab_id: &str, cols: u16, rows: u16) {
         self.tabs
             .entry(tab_id.to_string())
             .or_insert_with(|| Arc::new(TabState::new(cols, rows, self.ring_cap_bytes)));
 
-        if let Some(sidecar) = self.sidecar.clone() {
-            let tab_id = tab_id.to_string();
-            tauri::async_runtime::spawn(async move {
-                if let Err(e) = sidecar.open(&tab_id, cols, rows).await {
-                    eprintln!("[stream_hub] sidecar.open({tab_id}) failed: {e}");
-                }
-            });
+        if let Some(sidecar) = self.sidecar.as_ref() {
+            sidecar.open_nonblocking(tab_id, cols, rows);
         }
     }
 
@@ -258,26 +255,27 @@ impl StreamHub {
     }
 
     /// Update the tab's known size and tell the sidecar to resize its
-    /// shadow xterm. Called from `resize_pty`.
-    pub async fn resize_tab(&self, tab_id: &str, cols: u16, rows: u16) {
+    /// shadow xterm. Sync + fire-and-forget so callers don't have to be
+    /// async just to drag a divider.
+    pub fn resize_tab(&self, tab_id: &str, cols: u16, rows: u16) {
         if let Some(state) = self.tabs.get(tab_id) {
             state.cols.store(cols, Ordering::Release);
             state.rows.store(rows, Ordering::Release);
         }
         if let Some(sidecar) = self.sidecar.as_ref() {
-            if let Err(e) = sidecar.resize(tab_id, cols, rows).await {
-                eprintln!("[stream_hub] sidecar.resize({tab_id}) failed: {e}");
-            }
+            sidecar.resize_nonblocking(tab_id, cols, rows);
         }
     }
 
     /// Drop per-tab state and tell the sidecar to dispose its shadow.
-    pub async fn close_tab(&self, tab_id: &str) {
+    /// Sync + fire-and-forget. Called both from the user-facing close_tab
+    /// command and from spawn_pty when restarting a tab whose previous
+    /// PTY died (resets ring + seq + sidecar shadow so the new session
+    /// doesn't inherit stale state).
+    pub fn close_tab(&self, tab_id: &str) {
         self.tabs.remove(tab_id);
         if let Some(sidecar) = self.sidecar.as_ref() {
-            if let Err(e) = sidecar.close(tab_id).await {
-                eprintln!("[stream_hub] sidecar.close({tab_id}) failed: {e}");
-            }
+            sidecar.close_nonblocking(tab_id);
         }
     }
 
@@ -449,9 +447,44 @@ mod tests {
         let hub = new_hub();
         hub.ensure_tab("t1", 80, 24);
         hub.broadcast("t1", b"hello", "hello");
-        tauri::async_runtime::block_on(hub.close_tab("t1"));
+        hub.close_tab("t1");
         assert_eq!(hub.next_seq("t1"), None);
         assert!(hub.ring_entries("t1").is_none());
+    }
+
+    /// Regression: when `spawn_pty` restarts a tab whose previous PTY
+    /// expired, it calls `close_tab` then `ensure_tab` on the same id.
+    /// The hub state must come up fresh — same seq counter as a brand-
+    /// new tab, empty ring, no carried-over subscribers — otherwise
+    /// remote subscribers' resume-by-seq math is wrong on the next
+    /// session.
+    #[test]
+    fn close_then_ensure_resets_seq_ring_and_subscribers() {
+        let hub = new_hub();
+        let make_chan = || Arc::new(Mutex::new(None));
+
+        // First session.
+        hub.ensure_tab("t1", 80, 24);
+        let _id = hub.subscribe_local("t1", make_chan());
+        hub.broadcast("t1", b"first-session-bytes", "x");
+        assert_eq!(hub.next_seq("t1"), Some(1));
+        assert_eq!(hub.subscriber_count("t1"), Some(1));
+        assert_eq!(hub.ring_entries("t1").unwrap().len(), 1);
+
+        // Simulated respawn-after-expiry path.
+        hub.close_tab("t1");
+        hub.ensure_tab("t1", 80, 24);
+
+        // Fresh state: seq back to zero, no subscribers, empty ring.
+        assert_eq!(hub.next_seq("t1"), Some(0));
+        assert_eq!(hub.subscriber_count("t1"), Some(0));
+        assert_eq!(hub.ring_entries("t1").unwrap().len(), 0);
+
+        // A new subscriber attaches cleanly and its broadcasts are
+        // accounted against the fresh seq counter.
+        hub.subscribe_local("t1", make_chan());
+        hub.broadcast("t1", b"second-session", "x");
+        assert_eq!(hub.next_seq("t1"), Some(1));
     }
 
     #[test]

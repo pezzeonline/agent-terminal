@@ -117,8 +117,8 @@ pub async fn resize_pty(
     } // Lock released before dispatching to MOD engine.
     mod_engine.handle().on_resize(&tab_id, cols, rows);
     // Keep the sidecar's shadow xterm in sync so its future serialize
-    // payload reflects the right viewport dimensions.
-    hub.resize_tab(&tab_id, cols, rows).await;
+    // payload reflects the right viewport dimensions. Fire-and-forget.
+    hub.resize_tab(&tab_id, cols, rows);
     Ok(())
 }
 
@@ -144,8 +144,8 @@ pub async fn close_tab(
     }
     // Drop hub state + tell the sidecar to dispose its shadow xterm.
     // Done after the PtyMap mutation so the reader thread's `closing`
-    // check sees the same ordering it always did.
-    hub.close_tab(&tab_id).await;
+    // check sees the same ordering it always did. Fire-and-forget.
+    hub.close_tab(&tab_id);
     Ok(())
 }
 

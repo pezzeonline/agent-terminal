@@ -221,6 +221,27 @@ impl SidecarClient {
         Ok(())
     }
 
+    /// Fire-and-forget `open`. Pushes the line onto the writer mpsc
+    /// synchronously and returns; no reply is awaited. The sidecar
+    /// processes lines in arrival order, so a subsequent `write_bytes`
+    /// from the same thread is guaranteed to land after this line — that
+    /// is the ordering invariant `StreamHub::ensure_tab` relies on.
+    ///
+    /// Any sidecar-side failure (bad cols, OOM, etc.) is silently dropped
+    /// from the caller's perspective but surfaces on the sidecar's stderr
+    /// log, which the Rust client forwards with a `[sidecar]` prefix.
+    pub fn open_nonblocking(&self, tab_id: &str, cols: u16, rows: u16) {
+        if self.is_dead() {
+            return;
+        }
+        let line = json!({
+            "verb": "open",
+            "args": { "tab_id": tab_id, "cols": cols, "rows": rows }
+        })
+        .to_string();
+        let _ = self.inner.writer_tx.send(line);
+    }
+
     /// Push raw PTY bytes to the sidecar's parser for `tab_id`. Returns
     /// immediately — there is no reply. If the sidecar has died, the bytes
     /// silently drop; the caller's hot path stays branch-free.
@@ -246,6 +267,20 @@ impl SidecarClient {
         Ok(())
     }
 
+    /// Fire-and-forget `resize`. Same ordering and failure semantics as
+    /// `open_nonblocking`.
+    pub fn resize_nonblocking(&self, tab_id: &str, cols: u16, rows: u16) {
+        if self.is_dead() {
+            return;
+        }
+        let line = json!({
+            "verb": "resize",
+            "args": { "tab_id": tab_id, "cols": cols, "rows": rows }
+        })
+        .to_string();
+        let _ = self.inner.writer_tx.send(line);
+    }
+
     /// Ask the sidecar to serialize tab_id's buffer. Returns the xterm-
     /// serialize payload (a string containing escape sequences ready to
     /// replay into a fresh xterm Terminal).
@@ -266,6 +301,20 @@ impl SidecarClient {
     pub async fn close(&self, tab_id: &str) -> Result<()> {
         self.call("close", json!({ "tab_id": tab_id })).await?;
         Ok(())
+    }
+
+    /// Fire-and-forget `close`. Same ordering and failure semantics as
+    /// `open_nonblocking`.
+    pub fn close_nonblocking(&self, tab_id: &str) {
+        if self.is_dead() {
+            return;
+        }
+        let line = json!({
+            "verb": "close",
+            "args": { "tab_id": tab_id }
+        })
+        .to_string();
+        let _ = self.inner.writer_tx.send(line);
     }
 }
 
