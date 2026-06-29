@@ -160,6 +160,7 @@ export const TerminalPane = React.memo(function TerminalPane({
       onData={handleData}
       onResize={handleResize}
       isAgent={isAgent}
+      isActive={isActive}
       className="h-full min-h-0 w-full"
     />
   )
