@@ -44,6 +44,18 @@ pub type Result<T> = std::result::Result<T, SidecarError>;
 
 type PendingMap = Mutex<HashMap<u64, oneshot::Sender<Value>>>;
 
+/// Shared death-handling routine. Three independent failure paths converge
+/// here: stdin write error (writer task), stdout EOF / read error (reader
+/// task), and child process exit (reaper task). Setting `dead` short-
+/// circuits future `call()`s, and clearing the pending map drops every
+/// outstanding `oneshot::Sender` so awaiting callers resolve to
+/// `SidecarError::Dead` immediately instead of hanging until a slower path
+/// fires.
+async fn fail_all_pending(pending: &PendingMap, dead: &AtomicBool) {
+    dead.store(true, Ordering::Release);
+    pending.lock().await.clear();
+}
+
 /// Client handle. Cloneable: every clone shares the same child process and
 /// pending-reply table. The child is reaped when the last clone is dropped
 /// and the writer mpsc closes (stdin EOF → sidecar's `rl.on('close')` runs
@@ -80,8 +92,11 @@ impl SidecarClient {
         let dead = Arc::new(AtomicBool::new(false));
 
         // Writer task — owns stdin. Serialises writes so concurrent callers
-        // can't interleave bytes mid-line.
+        // can't interleave bytes mid-line. On stdin failure, fail every
+        // pending call (the child may still be alive but stdin is gone —
+        // the reaper alone wouldn't unblock callers in that case).
         {
+            let pending = Arc::clone(&pending);
             let dead = Arc::clone(&dead);
             tokio::spawn(async move {
                 let mut stdin = stdin;
@@ -90,7 +105,7 @@ impl SidecarClient {
                         || stdin.write_all(b"\n").await.is_err()
                         || stdin.flush().await.is_err()
                     {
-                        dead.store(true, Ordering::Release);
+                        fail_all_pending(&pending, &dead).await;
                         break;
                     }
                 }
@@ -98,9 +113,12 @@ impl SidecarClient {
         }
 
         // Stdout reader — parses one JSON line at a time, dispatches by
-        // `id` to the matching pending oneshot.
+        // `id` to the matching pending oneshot. On EOF or read error, fail
+        // every pending call (stdout could close while the child stays
+        // alive — same reasoning as the writer-failure path).
         {
             let pending = Arc::clone(&pending);
+            let dead = Arc::clone(&dead);
             tokio::spawn(async move {
                 let mut lines = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
@@ -124,6 +142,7 @@ impl SidecarClient {
                         }
                     }
                 }
+                fail_all_pending(&pending, &dead).await;
             });
         }
 
@@ -135,18 +154,16 @@ impl SidecarClient {
             }
         });
 
-        // Reaper — when the child exits, mark dead and drop every still-
-        // pending Sender so awaiting callers see SidecarError::Dead promptly
-        // instead of hanging forever.
+        // Reaper — when the child exits, fail every still-pending call so
+        // awaiting callers see SidecarError::Dead immediately instead of
+        // hanging forever.
         {
             let pending = Arc::clone(&pending);
             let dead = Arc::clone(&dead);
             tokio::spawn(async move {
                 let status = child.wait().await;
-                dead.store(true, Ordering::Release);
                 eprintln!("[sidecar] process exited: {status:?}");
-                let mut map = pending.lock().await;
-                map.clear();
+                fail_all_pending(&pending, &dead).await;
             });
         }
 
@@ -257,35 +274,44 @@ mod tests {
     use super::*;
     use tokio::time::{Duration, timeout};
 
-    // Fast helper: a "yes/echo" sidecar implemented in bun. Reads JSON lines,
-    // for each line with an id field writes back `{id, ok: true, payload:""}`
-    // so `serialize` calls return a non-null payload and other calls succeed.
-    // No actual xterm — pure protocol fidelity check.
-    fn echo_sidecar_command() -> Command {
-        let mut cmd = Command::new("bun");
-        // -e expression: avoids needing a temp file. Bun supports `bun -e`.
-        cmd.arg("-e")
-            .arg(
-                r#"
-                const rl = require('node:readline').createInterface({ input: process.stdin });
-                rl.on('line', (line) => {
-                    try {
-                        const m = JSON.parse(line);
-                        if (m.id != null) {
-                            process.stdout.write(JSON.stringify({ id: m.id, ok: true, payload: '' }) + '\n');
-                        }
-                    } catch {}
-                });
-                rl.on('close', () => process.exit(0));
-                process.stderr.write('[echo-sidecar] ready\n');
-                "#,
-            );
-        cmd
+    // Fast helper: a "yes/echo" sidecar implemented as an inline -e script.
+    // Reads JSON lines; for each line carrying an `id` field writes back
+    // `{id, ok: true, payload: ''}` so `serialize` returns a non-null
+    // payload and other calls succeed. No xterm — pure protocol fidelity.
+    //
+    // Returns None when neither node nor bun is on PATH (CI matrix without
+    // a JS runtime), so the test can skip cleanly instead of failing on a
+    // missing-binary error.
+    fn echo_sidecar_command() -> Option<Command> {
+        let runtime = which::which("node")
+            .or_else(|_| which::which("bun"))
+            .ok()?;
+        let mut cmd = Command::new(runtime);
+        cmd.arg("-e").arg(
+            r#"
+            const rl = require('node:readline').createInterface({ input: process.stdin });
+            rl.on('line', (line) => {
+                try {
+                    const m = JSON.parse(line);
+                    if (m.id != null) {
+                        process.stdout.write(JSON.stringify({ id: m.id, ok: true, payload: '' }) + '\n');
+                    }
+                } catch {}
+            });
+            rl.on('close', () => process.exit(0));
+            process.stderr.write('[echo-sidecar] ready\n');
+            "#,
+        );
+        Some(cmd)
     }
 
     #[tokio::test]
     async fn open_resize_close_roundtrip() {
-        let client = SidecarClient::spawn(echo_sidecar_command()).await.unwrap();
+        let Some(cmd) = echo_sidecar_command() else {
+            eprintln!("[test] skipping — no node/bun on PATH");
+            return;
+        };
+        let client = SidecarClient::spawn(cmd).await.unwrap();
         timeout(Duration::from_secs(5), client.open("t1", 80, 24))
             .await
             .unwrap()
@@ -302,7 +328,11 @@ mod tests {
 
     #[tokio::test]
     async fn write_bytes_is_fire_and_forget() {
-        let client = SidecarClient::spawn(echo_sidecar_command()).await.unwrap();
+        let Some(cmd) = echo_sidecar_command() else {
+            eprintln!("[test] skipping — no node/bun on PATH");
+            return;
+        };
+        let client = SidecarClient::spawn(cmd).await.unwrap();
         // Spam writes; the call returns immediately even if the sidecar is
         // slow to process. Mostly a sanity check that the API does not
         // accidentally become blocking.
@@ -316,7 +346,11 @@ mod tests {
 
     #[tokio::test]
     async fn concurrent_calls_get_distinct_ids() {
-        let client = SidecarClient::spawn(echo_sidecar_command()).await.unwrap();
+        let Some(cmd) = echo_sidecar_command() else {
+            eprintln!("[test] skipping — no node/bun on PATH");
+            return;
+        };
+        let client = SidecarClient::spawn(cmd).await.unwrap();
         let handles: Vec<_> = (0..50)
             .map(|i| {
                 let c = client.clone();
