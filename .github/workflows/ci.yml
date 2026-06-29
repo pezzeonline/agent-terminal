@@ -56,10 +56,24 @@ jobs:
         if: ${{ !cancelled() }}
         # Scoped to src/ because bare `bun test` recurses cwd and would
         # discover src-tauri/sidecar/test/*.test.ts. Those tests import
-        # @xterm/headless from src-tauri/sidecar/node_modules/, which CI
-        # doesn't install; root deps and sidecar deps live in separate
-        # trees on purpose. Matches the local `bun run test` script.
+        # @xterm/headless from src-tauri/sidecar/node_modules/, which is
+        # installed by the dedicated step below. Root deps and sidecar
+        # deps live in separate trees on purpose. Matches the local
+        # `bun run test` script.
         run: bun test src/
+
+      # Sidecar substrate has its own dep tree (src-tauri/sidecar/node_modules)
+      # because @xterm/headless and addon-serialize are server-side only and
+      # have no business in the Tauri frontend bundle. Install + test as a
+      # separate step so a failure here is attributed correctly in CI.
+      - name: Install sidecar deps
+        if: ${{ !cancelled() }}
+        working-directory: src-tauri/sidecar
+        run: bun install --frozen-lockfile
+      - name: Sidecar bun test
+        if: ${{ !cancelled() }}
+        working-directory: src-tauri/sidecar
+        run: bun test
 
   # Single job, not split per check: cargo's incremental build cache is shared
   # across check / clippy / test, so splitting would recompile Tauri/Wry deps
