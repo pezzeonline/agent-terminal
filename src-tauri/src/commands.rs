@@ -1,16 +1,22 @@
 use crate::mod_engine::ModEngine;
 use crate::pty_manager::{spawn_pty, try_reattach, PtyDataPayload, PtyMap, ReattachResult};
+use crate::stream_hub::StreamHub;
 use portable_pty::PtySize;
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, State};
 use tauri::ipc::Channel;
 
+// Tauri commands take their managed state + frontend args by position.
+// Bundling into a struct would lose the ergonomic state injection.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn open_tab(
     app: AppHandle,
     pty_map: State<'_, PtyMap>,
     mod_engine: State<'_, ModEngine>,
+    hub: State<'_, Arc<StreamHub>>,
     tab_id: String,
     cwd: Option<String>,
     shell: Option<String>,
@@ -37,6 +43,7 @@ pub async fn open_tab(
         &pty_map,
         mod_engine.handle(),
         mod_engine.cwd_table(),
+        Arc::clone(&hub),
         &tab_id,
         on_data.clone(),
     ) {
@@ -59,6 +66,7 @@ pub async fn open_tab(
         &pty_map,
         mod_engine.handle(),
         mod_engine.cwd_table(),
+        Arc::clone(&hub),
         tab_id,
         cwd,
         shell,
@@ -91,6 +99,7 @@ pub async fn write_pty(
 pub async fn resize_pty(
     pty_map: State<'_, PtyMap>,
     mod_engine: State<'_, ModEngine>,
+    hub: State<'_, Arc<StreamHub>>,
     tab_id: String,
     cols: u16,
     rows: u16,
@@ -107,12 +116,16 @@ pub async fn resize_pty(
         }
     } // Lock released before dispatching to MOD engine.
     mod_engine.handle().on_resize(&tab_id, cols, rows);
+    // Keep the sidecar's shadow xterm in sync so its future serialize
+    // payload reflects the right viewport dimensions.
+    hub.resize_tab(&tab_id, cols, rows).await;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn close_tab(
     pty_map: State<'_, PtyMap>,
+    hub: State<'_, Arc<StreamHub>>,
     tab_id: String,
 ) -> Result<(), String> {
     // The reader thread reads `closing` on EOF to decide between emitting
@@ -122,11 +135,17 @@ pub async fn close_tab(
     // reader reads `closing`, either we've already set it (and the entry
     // is gone — exit path) or we haven't yet (entry still present —
     // respawn path).
-    let mut map = pty_map.lock().unwrap();
-    if let Some(handle) = map.get(&tab_id) {
-        handle.closing.store(true, Ordering::Release);
+    {
+        let mut map = pty_map.lock().unwrap();
+        if let Some(handle) = map.get(&tab_id) {
+            handle.closing.store(true, Ordering::Release);
+        }
+        map.remove(&tab_id);
     }
-    map.remove(&tab_id);
+    // Drop hub state + tell the sidecar to dispose its shadow xterm.
+    // Done after the PtyMap mutation so the reader thread's `closing`
+    // check sees the same ordering it always did.
+    hub.close_tab(&tab_id).await;
     Ok(())
 }
 

@@ -66,4 +66,8 @@ thiserror = "2"
 # eventually carry a Node binary inside the .app bundle; until then, dev
 # launches look the runtime up from the system.
 which = "8"
+# Sharded concurrent map for the StreamHub's per-tab state. Many reader
+# threads broadcast concurrently across different tabs; a single Mutex
+# would serialise unrelated tabs through the lock.
+dashmap = "6"
 
