@@ -9,7 +9,14 @@ name: CI
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-    branches: [main]
+    # Integration branches that stack PRs:
+    # - main: production target.
+    # - feat/desktop-sidecar-substrate: epic branch for the mobile-companion
+    #   server stack. Sub-step PRs target this branch and only land in main
+    #   once the whole stack is ready.
+    branches:
+      - main
+      - feat/desktop-sidecar-substrate
     paths-ignore:
       - 'companion/**'
   workflow_dispatch:
