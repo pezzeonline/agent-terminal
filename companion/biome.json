@@ -23,6 +23,9 @@
     },
     "rules": {
       "preset": "recommended",
+      "nursery": {
+        "useSortedClasses": "error"
+      },
       "correctness": {
         "noUnusedImports": "error",
         "noUnusedVariables": "error"
