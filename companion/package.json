@@ -9,7 +9,10 @@
     "react-native": "0.85.3"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.5.1",
     "@types/react": "~19.2.2",
+    "concurrently": "^10.0.3",
+    "fallow": "^2.102.0",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -17,11 +20,14 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
+    "fmt": "biome format",
+    "lint": "biome lint",
     "typecheck": "tsc --noEmit",
     "fallow": "fallow",
     "fallow:dead-code": "fallow dead-code",
     "fallow:dupes": "fallow dupes",
-    "fallow:health": "fallow health"
+    "fallow:health": "fallow health",
+    "check": "concurrently --group --names fmt,lint,typecheck,fallow --prefix-colors auto \"bun run fmt\" \"bun run lint\" \"bun run typecheck\" \"bun run fallow\""
   },
   "private": true
 }
