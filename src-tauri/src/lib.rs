@@ -13,6 +13,8 @@ mod shell_integration;
 // pub so integration tests can drive a SidecarClient instance directly
 // without going through the full Tauri startup path.
 pub mod sidecar_client;
+// pub for the same reason — tests construct StreamHub directly.
+pub mod stream_hub;
 
 use hook_config::ensure_hooks_installed;
 use hook_server::start_hook_server;
@@ -42,6 +44,7 @@ use sidecar_client::SidecarClient;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use stream_hub::StreamHub;
 use tokio::process::Command;
 
 /// Locate the runtime binary + sidecar entry script. Dev launches read from
@@ -197,12 +200,20 @@ pub fn run() {
 
             // Headless-xterm sidecar. Spawned as best-effort so a missing
             // node/bun runtime or a not-yet-bundled script never blocks the
-            // desktop from launching. Consumers (StreamHub, WSS server)
-            // check app.try_state::<Arc<SidecarClient>>() and degrade
-            // gracefully when None.
-            if let Some(client) = tauri::async_runtime::block_on(try_spawn_sidecar()) {
-                app.manage(Arc::new(client));
+            // desktop from launching. The StreamHub built below uses
+            // Option<Arc<SidecarClient>> so it degrades to local-only fan-
+            // out when the sidecar isn't available.
+            let sidecar = tauri::async_runtime::block_on(try_spawn_sidecar()).map(Arc::new);
+            if let Some(client) = sidecar.clone() {
+                app.manage(client);
             }
+
+            // Per-tab fan-out hub. Always present so pty_manager's reader
+            // threads have a stable broadcast target; the sidecar passed in
+            // is the optional bit. State<'_, Arc<StreamHub>> is the handle
+            // Tauri commands grab.
+            let hub = StreamHub::new(sidecar);
+            app.manage(hub);
 
             // Window focus → suppression signal only.
             // (The previous focus-event-based click heuristic is gone — it

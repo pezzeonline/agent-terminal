@@ -1,4 +1,5 @@
 use crate::mod_engine::{CwdTable, ModEngineHandle};
+use crate::stream_hub::StreamHub;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -104,6 +105,11 @@ struct ReaderCtx {
     closing: Arc<AtomicBool>,
     pty_map: PtyMap,
     cwd_table: CwdTable,
+    /// Per-tab fan-out into local subscribers + sidecar shadow xterm.
+    /// Reader threads broadcast every PTY chunk through here; the local
+    /// channel above is one of its subscribers (still owned here for the
+    /// reconnect-swap mechanism try_reattach uses).
+    hub: Arc<StreamHub>,
 }
 
 /// Spawns the reader thread that forwards PTY bytes to the frontend.
@@ -136,9 +142,10 @@ fn spawn_reader_thread(
                     decoded.clear();
                     let _ = decoder.decode_to_string(&[], &mut decoded, true);
                     if !decoded.is_empty() {
-                        if let Some(ch) = ctx.channel.lock().unwrap().as_ref() {
-                            ch.send(PtyDataPayload { data: decoded.clone() }).ok();
-                        }
+                        // Decoder tail goes to local subscribers only:
+                        // raw bytes are empty here so the ring + sidecar
+                        // see nothing (matches the pre-hub flush path).
+                        ctx.hub.broadcast(&ctx.tab_id, &[], &decoded);
                     }
 
                     // Mark dead first so try_reattach can't observe
@@ -191,25 +198,15 @@ fn spawn_reader_thread(
                     let (_result, _bytes_read, _had_errors) =
                         decoder.decode_to_string(&buf[..n], &mut decoded, false);
 
-                    let send_ok = {
-                        let guard = ctx.channel.lock().unwrap();
-                        match guard.as_ref() {
-                            Some(ch) => {
-                                ch.send(PtyDataPayload { data: decoded.clone() }).is_ok()
-                            }
-                            // No channel — WebView disconnected. Skip the
-                            // forward but still feed mods so per-tab state
-                            // stays current for reconnect.
-                            None => true,
-                        }
-                    };
+                    // Single fan-out: hub.broadcast handles the local
+                    // WebView send (including dead-channel cleanup), the
+                    // ring buffer, and the sidecar shadow write. The
+                    // PtyDataPayload-shape preservation for the WebView
+                    // path is byte-identical to the pre-hub code.
+                    ctx.hub.broadcast(&ctx.tab_id, &buf[..n], &decoded);
 
-                    if !send_ok {
-                        // Channel dropped mid-flight (WebView vanished while
-                        // we were sending). Clear the dead channel; the
-                        // process is fine, open_tab will swap in a new one.
-                        ctx.channel.lock().unwrap().take();
-                    }
+                    // Mods still see raw bytes directly — the hub is
+                    // purely a forwarder for subscribers.
                     ctx.mod_handle.on_output(&ctx.tab_id, buf[..n].to_vec());
                 }
             }
@@ -317,6 +314,7 @@ fn respawn_in_place(ctx: &ReaderCtx) -> Result<RespawnOutcome, String> {
             closing: ctx.closing.clone(),
             pty_map: ctx.pty_map.clone(),
             cwd_table: ctx.cwd_table.clone(),
+            hub: Arc::clone(&ctx.hub),
         },
         new_reader,
     );
@@ -337,6 +335,7 @@ pub fn try_reattach(
     pty_map: &PtyMap,
     mod_handle: ModEngineHandle,
     cwd_table: CwdTable,
+    hub: Arc<StreamHub>,
     tab_id: &str,
     on_data: Channel<PtyDataPayload>,
 ) -> Result<ReattachResult, String> {
@@ -394,6 +393,7 @@ pub fn try_reattach(
             closing,
             pty_map: pty_map.clone(),
             cwd_table,
+            hub,
         },
         reader,
     );
@@ -466,11 +466,16 @@ fn build_shell_command(
     cmd
 }
 
+// Long signature is the trade-off for keeping spawn_pty callable from both
+// the open_tab command and the respawn / try_reattach paths without a
+// builder. A SpawnConfig struct would be cleaner but is scope creep here.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_pty(
     app: AppHandle,
     pty_map: &PtyMap,
     mod_handle: ModEngineHandle,
     cwd_table: CwdTable,
+    hub: Arc<StreamHub>,
     tab_id: String,
     cwd: Option<String>,
     shell: Option<String>,
@@ -516,6 +521,20 @@ pub fn spawn_pty(
         },
     );
 
+    // Reset any stale hub state for this tab id before wiring the new
+    // session. spawn_pty runs when try_reattach returned NotFound or
+    // Expired — for Expired, the previous session left a TabState with
+    // its own seq counter, ring entries, and (potentially) a
+    // disconnected SharedChannel still in the subscriber list. Carrying
+    // those into the new PTY would silently leak subscribers and break
+    // remote-resume sequence math once remote subscribers exist.
+    //
+    // close_tab is a no-op for the NotFound case, so this is safe to
+    // run unconditionally.
+    hub.close_tab(&tab_id);
+    hub.ensure_tab(&tab_id, 80, 24);
+    hub.subscribe_local(&tab_id, channel.clone());
+
     spawn_reader_thread(
         ReaderCtx {
             app,
@@ -526,6 +545,7 @@ pub fn spawn_pty(
             closing,
             pty_map: pty_map.clone(),
             cwd_table,
+            hub,
         },
         reader,
     );
