@@ -51,11 +51,13 @@ function openTab({ tab_id, cols, rows }) {
   })
   const serializer = new SerializeAddon()
   term.loadAddon(serializer)
-  // last_seq: highest seq the Rust hub has enqueued for this tab. Updated by
-  // writeBytes; returned by serializeTab so subscribe_remote can tag its
-  // snapshot with the exact seq whose bytes are reflected in the payload.
-  // 0 means "no writes seen yet".
-  terminals.set(tab_id, { term, serializer, last_seq: 0 })
+  // last_seq: highest seq the Rust hub has enqueued for this tab. Updated
+  // by writeBytes; returned by serializeTab so subscribe_remote can tag
+  // its snapshot with the exact seq whose bytes are reflected in the
+  // payload. `null` is the "no writes seen yet" sentinel — distinct from
+  // 0, which is a legitimate first-broadcast seq. The Rust side reads
+  // this as `Option<u64>` and initialises new subscribers accordingly.
+  terminals.set(tab_id, { term, serializer, last_seq: null })
 }
 
 function writeBytes({ tab_id, bytes_b64, seq }) {

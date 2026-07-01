@@ -95,10 +95,11 @@ describe('dispatch — happy path', () => {
     expect(r.ok).toBe(true)
     expect(typeof r.payload).toBe('string')
     expect(r.payload as string).toContain('hello world')
-    // last_seq defaults to 0 when write was called without a seq (this
-    // test's write above does not pass one). See dedicated seq-threading
-    // test below for the non-zero path.
-    expect(r.last_seq).toBe(0)
+    // last_seq is null when writeBytes was called without a seq (this
+    // test's write above does not pass one). The Rust side reads this
+    // as Option::None which subscribe_remote treats as "no writes seen
+    // yet." See the dedicated seq-threading test below for Some(N).
+    expect(r.last_seq).toBeNull()
   })
 
   test('serialize returns last_seq threaded through writeBytes', async () => {

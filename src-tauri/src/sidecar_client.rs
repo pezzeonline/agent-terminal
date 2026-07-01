@@ -293,11 +293,18 @@ impl SidecarClient {
     ///
     /// - `payload` is the xterm-serialize output (escape sequences ready to
     ///   replay into a fresh xterm Terminal).
-    /// - `last_seq` is the highest seq the sidecar had fully parsed at the
-    ///   moment the payload was captured. Callers use this to tag
-    ///   `ServerFrame::Snapshot.seq` so subsequent broadcast fan-out can
-    ///   deduplicate with `if seq <= last_acked { skip }`.
-    pub async fn serialize(&self, tab_id: &str, scrollback: u32) -> Result<(String, u64)> {
+    /// - `last_seq` is `Some(N)` where N is the highest seq the sidecar had
+    ///   fully parsed at the moment the payload was captured, or `None`
+    ///   when no writes have been observed yet (freshly-opened tab). The
+    ///   `None` case is distinct from `Some(0)`: seq 0 is a legitimate
+    ///   first-broadcast value, and subscribe_remote uses this distinction
+    ///   to decide whether to send the first broadcast (`None` → always
+    ///   send it; `Some(N)` → dedupe with `if seq <= N { skip }`).
+    pub async fn serialize(
+        &self,
+        tab_id: &str,
+        scrollback: u32,
+    ) -> Result<(String, Option<u64>)> {
         let reply = self
             .call(
                 "serialize",
@@ -309,11 +316,7 @@ impl SidecarClient {
             .and_then(Value::as_str)
             .map(String::from)
             .ok_or_else(|| SidecarError::InvalidReply("missing payload field".to_string()))?;
-        // last_seq is 0 for a freshly-opened tab that hasn't received any
-        // writes yet. Missing from older sidecar builds also reads as 0 —
-        // safe default; the drift race we're closing here has no bearing
-        // on an empty terminal.
-        let last_seq = reply.get("last_seq").and_then(Value::as_u64).unwrap_or(0);
+        let last_seq = reply.get("last_seq").and_then(Value::as_u64);
         Ok((payload, last_seq))
     }
 
@@ -470,8 +473,10 @@ mod tests {
             "serialize payload did not contain written text. payload: {payload}"
         );
         // Threading check: the sidecar echoes back the highest seq it saw
-        // via `writeBytes.seq`. Our write above tagged seq 42.
-        assert_eq!(last_seq, 42, "last_seq must round-trip through the sidecar");
+        // via `writeBytes.seq`. Our write above tagged seq 42, so
+        // last_seq must round-trip as Some(42). None would indicate the
+        // sidecar treated the write as seqless (path regression).
+        assert_eq!(last_seq, Some(42));
 
         client.close("tab-1").await.expect("close");
     }
