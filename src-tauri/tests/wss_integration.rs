@@ -32,10 +32,11 @@ use tokio_tungstenite::tungstenite::Message;
 /// Build a fully-wired ServerState with a known token. Sidecar is None
 /// (no headless xterm), so Snapshots come back with empty payload and
 /// broadcasts show up as base64-encoded Bytes frames only.
+///
+/// Uses `wss_server::run_with_listener` — the test binds the listener
+/// itself and hands it to the server task. No drop-then-rebind race, no
+/// sleep-and-hope wait for the server to come up.
 async fn spawn_server(token: &str) -> (SocketAddr, Arc<ServerState>) {
-    // Bind first to a kernel-assigned port so we can hand it back for
-    // the client to connect to. Then hand ownership of the listener
-    // over to the server task.
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind ephemeral");
@@ -66,16 +67,25 @@ async fn spawn_server(token: &str) -> (SocketAddr, Arc<ServerState>) {
         mod_engine_handle: ModEngineHandle::noop(),
     });
 
-    // Release the listener so `run()` can rebind the same addr. Ports
-    // are TIME_WAIT-safe within the ~50ms this test needs.
-    drop(listener);
     let state_for_task = Arc::clone(&state);
     tokio::spawn(async move {
-        let _ = wss_server::run(addr, state_for_task).await;
+        let _ = wss_server::run_with_listener(listener, state_for_task).await;
     });
 
-    // Give the server a beat to bind.
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    // Poll for readiness instead of guessing with a fixed sleep. The
+    // listener is already bound (we did it above); this loop just
+    // waits until axum's serve loop has begun accepting connections.
+    // Deterministic on slow CI, fast on a healthy dev box.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    loop {
+        if tokio::net::TcpStream::connect(addr).await.is_ok() {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("wss server never came up at {addr}");
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     (addr, state)
 }
 
@@ -106,7 +116,8 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let json = serde_json::to_string(frame).expect("serialise");
-    ws.send(Message::Text(json)).await.expect("send");
+    // `.into()` converts String → Utf8Bytes (tungstenite 0.26 Text variant).
+    ws.send(Message::Text(json.into())).await.expect("send");
 }
 
 async fn recv_frame<S>(

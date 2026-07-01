@@ -336,14 +336,17 @@ impl StreamHub {
     /// snapshot's `last_seq`, catching up bytes that landed between the
     /// serialize call and the subscribers-lock acquisition.
     ///
-    /// Returns the SubscriberId the caller passes back to `unsubscribe`.
-    /// Async because sidecar.serialize awaits a reply.
+    /// Returns `Some(SubscriberId)` on success. Returns `None` when the
+    /// receiver is already dropped and initial delivery fails — no
+    /// subscriber is registered in that case (would otherwise sit dead
+    /// in the list until a broadcast triggers reap). Async because
+    /// sidecar.serialize awaits a reply.
     pub async fn subscribe_remote(
         &self,
         tab_id: &str,
         outbox: mpsc::UnboundedSender<ServerFrame>,
         scrollback: u32,
-    ) -> SubscriberId {
+    ) -> Option<SubscriberId> {
         let state = self
             .tabs
             .entry(tab_id.to_string())
@@ -370,7 +373,7 @@ impl StreamHub {
         outbox: mpsc::UnboundedSender<ServerFrame>,
         last_seq: u64,
         scrollback: u32,
-    ) -> SubscriberId {
+    ) -> Option<SubscriberId> {
         let state = self
             .tabs
             .entry(tab_id.to_string())
@@ -388,17 +391,35 @@ impl StreamHub {
             let mut subs = state.subscribers.lock().expect("subscribers lock poisoned");
             let ring = state.ring.lock().expect("ring lock poisoned");
             let mut highest_delivered = last_seq;
+            // Track outbox health across every ring-replay send. If the
+            // receiver dropped mid-delivery, don't register a dead
+            // subscriber that would sit in the list until a later
+            // broadcast triggers the reap.
+            let mut delivery_ok = true;
             for (seq, bytes) in ring.entries.iter() {
                 if *seq > last_seq {
-                    let _ = outbox.send(ServerFrame::Bytes {
-                        tab_id: tab_id.to_string(),
-                        seq: *seq,
-                        data: B64.encode(bytes),
-                    });
+                    if outbox
+                        .send(ServerFrame::Bytes {
+                            tab_id: tab_id.to_string(),
+                            seq: *seq,
+                            data: B64.encode(bytes),
+                        })
+                        .is_err()
+                    {
+                        delivery_ok = false;
+                        break;
+                    }
                     highest_delivered = *seq;
                 }
             }
             drop(ring);
+            if !delivery_ok {
+                eprintln!(
+                    "[stream_hub] resume_remote({tab_id}): outbox closed \
+                     mid-replay; skipping subscriber registration"
+                );
+                return None;
+            }
             let id = SubscriberId(state.next_sub_id.fetch_add(1, Ordering::Relaxed));
             subs.push((
                 id,
@@ -407,7 +428,7 @@ impl StreamHub {
                     outbox,
                 },
             ));
-            id
+            Some(id)
         } else {
             let (payload, sidecar_seq) = self.fetch_snapshot(tab_id, scrollback).await;
             self.attach_remote_and_catch_up(&state, tab_id, outbox, payload, sidecar_seq)
@@ -426,18 +447,27 @@ impl StreamHub {
         outbox: mpsc::UnboundedSender<ServerFrame>,
         payload: String,
         sidecar_seq: Option<u64>,
-    ) -> SubscriberId {
+    ) -> Option<SubscriberId> {
         let mut subs = state.subscribers.lock().expect("subscribers lock poisoned");
         let ring = state.ring.lock().expect("ring lock poisoned");
 
         // Snapshot's seq on the wire: sidecar_seq if known, else 0 with an
         // empty payload. Client stores this for future resume requests.
         let snapshot_seq_on_wire = sidecar_seq.unwrap_or(0);
-        let _ = outbox.send(ServerFrame::Snapshot {
-            tab_id: tab_id.to_string(),
-            seq: snapshot_seq_on_wire,
-            payload,
-        });
+        if outbox
+            .send(ServerFrame::Snapshot {
+                tab_id: tab_id.to_string(),
+                seq: snapshot_seq_on_wire,
+                payload,
+            })
+            .is_err()
+        {
+            eprintln!(
+                "[stream_hub] subscribe_remote({tab_id}): outbox closed \
+                 before Snapshot delivery; skipping subscriber registration"
+            );
+            return None;
+        }
 
         // Replay ring entries newer than the snapshot's coverage. Closes
         // the race where a broadcast landed between subscribe's serialize
@@ -449,11 +479,20 @@ impl StreamHub {
                 None => true,
             };
             if should_replay {
-                let _ = outbox.send(ServerFrame::Bytes {
-                    tab_id: tab_id.to_string(),
-                    seq: *seq,
-                    data: B64.encode(bytes),
-                });
+                if outbox
+                    .send(ServerFrame::Bytes {
+                        tab_id: tab_id.to_string(),
+                        seq: *seq,
+                        data: B64.encode(bytes),
+                    })
+                    .is_err()
+                {
+                    eprintln!(
+                        "[stream_hub] subscribe_remote({tab_id}): outbox closed \
+                         mid-replay; skipping subscriber registration"
+                    );
+                    return None;
+                }
                 highest_delivered = Some(*seq);
             }
         }
@@ -472,7 +511,7 @@ impl StreamHub {
                 outbox,
             },
         ));
-        id
+        Some(id)
     }
 
     /// Ask the sidecar for a serialize snapshot; degrade to empty payload
@@ -932,6 +971,37 @@ mod tests {
                 .any(|f| matches!(f, ServerFrame::Snapshot { .. })),
             "gap-too-wide resume must send a fresh Snapshot"
         );
+    }
+
+    #[tokio::test]
+    async fn subscribe_remote_returns_none_when_outbox_already_closed() {
+        // Regression pin: if the outbox receiver is already dropped
+        // by the time subscribe_remote runs, the function must NOT
+        // register a dead subscriber (which would sit in the list
+        // until a future broadcast triggers the reap). It returns
+        // None and subscriber_count stays at zero.
+        let hub = new_hub();
+        hub.ensure_tab("t1", 80, 24);
+        let (tx, rx) = mpsc::unbounded_channel::<ServerFrame>();
+        drop(rx);
+        let id = hub.subscribe_remote("t1", tx, 500).await;
+        assert!(id.is_none(), "closed outbox must not produce a SubscriberId");
+        assert_eq!(hub.subscriber_count("t1"), Some(0));
+    }
+
+    #[tokio::test]
+    async fn resume_remote_returns_none_when_outbox_closed_mid_replay() {
+        // Same regression pin for the resume-within-ring fast path.
+        let hub = new_hub();
+        hub.ensure_tab("t1", 80, 24);
+        for i in 0..3u8 {
+            hub.broadcast("t1", &[i], "x");
+        }
+        let (tx, rx) = mpsc::unbounded_channel::<ServerFrame>();
+        drop(rx);
+        let id = hub.resume_remote("t1", tx, 0, 500).await;
+        assert!(id.is_none(), "closed outbox must not produce a SubscriberId");
+        assert_eq!(hub.subscriber_count("t1"), Some(0));
     }
 
     #[tokio::test]

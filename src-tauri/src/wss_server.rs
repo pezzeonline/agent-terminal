@@ -75,6 +75,20 @@ pub async fn run(addr: SocketAddr, state: Arc<ServerState>) -> Result<(), WssErr
     let listener = TcpListener::bind(addr)
         .await
         .map_err(|source| WssError::Bind { addr, source })?;
+    run_with_listener(listener, state).await
+}
+
+/// Serve on an already-bound listener. Public so integration tests can
+/// hold the port from allocation through serving — no drop-then-rebind
+/// race, no sleep waiting for the server to come up. Production callers
+/// go through `run(addr, state)` which binds first, then delegates here.
+pub async fn run_with_listener(
+    listener: TcpListener,
+    state: Arc<ServerState>,
+) -> Result<(), WssError> {
+    let addr = listener
+        .local_addr()
+        .unwrap_or_else(|_| SocketAddr::from(([0, 0, 0, 0], 0)));
     // Loud dev-only warning so anyone reading the terminal knows this
     // server is exposed to the LAN with no TLS. Phase 2 introduces the
     // TOFU-pinned self-signed cert.
@@ -262,11 +276,16 @@ async fn dispatch_client_frame(
             if let Some(prev) = subscriptions.remove(&tab_id) {
                 state.hub.unsubscribe(&tab_id, prev);
             }
-            let id = state
+            // subscribe_remote returns None if the outbox closed during
+            // initial Snapshot / ring replay. Nothing to track; the
+            // connection is about to unwind on its own.
+            if let Some(id) = state
                 .hub
                 .subscribe_remote(&tab_id, outbox_tx.clone(), scrollback)
-                .await;
-            subscriptions.insert(tab_id, id);
+                .await
+            {
+                subscriptions.insert(tab_id, id);
+            }
         }
 
         ClientFrame::Resume {
@@ -277,11 +296,13 @@ async fn dispatch_client_frame(
             if let Some(prev) = subscriptions.remove(&tab_id) {
                 state.hub.unsubscribe(&tab_id, prev);
             }
-            let id = state
+            if let Some(id) = state
                 .hub
                 .resume_remote(&tab_id, outbox_tx.clone(), last_seq, scrollback)
-                .await;
-            subscriptions.insert(tab_id, id);
+                .await
+            {
+                subscriptions.insert(tab_id, id);
+            }
         }
 
         ClientFrame::Unsubscribe { tab_id } => {
