@@ -17,7 +17,7 @@
 // handshake per-device tokens stored in the macOS Keychain.
 
 use crate::auth_stub::AuthStub;
-use crate::mod_engine::ModEngine;
+use crate::mod_engine::ModEngineHandle;
 use crate::project_registry::ProjectRegistry;
 use crate::protocol::{ClientFrame, ServerFrame};
 use crate::pty_manager::PtyMap;
@@ -64,7 +64,7 @@ pub struct ServerState {
     /// `Mutex<HashMap>` is fine at Phase 1 keystroke rates; if
     /// contention shows in profiling we split the lock.
     pub pty_map: PtyMap,
-    pub mod_engine: Arc<ModEngine>,
+    pub mod_engine_handle: ModEngineHandle,
 }
 
 /// Bind the WSS server to `addr` and serve until the listener closes.
@@ -304,7 +304,7 @@ async fn dispatch_client_frame(
                     }
                 }
             }
-            state.mod_engine.handle().on_input(&tab_id, bytes);
+            state.mod_engine_handle.on_input(&tab_id, bytes);
         }
 
         ClientFrame::Resize {
@@ -325,7 +325,7 @@ async fn dispatch_client_frame(
                     }
                 }
             }
-            state.mod_engine.handle().on_resize(&tab_id, cols, rows);
+            state.mod_engine_handle.on_resize(&tab_id, cols, rows);
             // Keep the sidecar's shadow xterm in step so a subsequent
             // Snapshot from a re-subscribing client sees the right
             // dimensions.

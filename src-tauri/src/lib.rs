@@ -53,6 +53,8 @@ use tauri::Emitter;
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 #[cfg(all(target_os = "macos", not(feature = "dev-instance")))]
 use tauri::menu::MenuItemBuilder;
+use auth_stub::AuthStub;
+use project_registry::ProjectRegistry;
 use pty_manager::PtyMap;
 use sidecar_client::SidecarClient;
 use std::collections::HashMap;
@@ -60,6 +62,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use stream_hub::StreamHub;
 use tokio::process::Command;
+use wss_server::ServerState;
 
 /// Locate the runtime binary + sidecar entry script. Dev launches read from
 /// the source tree via CARGO_MANIFEST_DIR; production bundling is a separate
@@ -145,8 +148,12 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init());
 
+    // Cheap Arc clones the setup closure needs before the outer scope
+    // hands ownership to `.manage(pty_map)` at the end of the builder.
+    let pty_map_for_setup = Arc::clone(&pty_map);
+
     builder
-        .setup(|app| {
+        .setup(move |app| {
             // Custom macOS menu — omits the default items whose shortcuts
             // conflict with our keyboard handlers:
             //   View → Actual Size / Zoom In / Zoom Out  (⌘0 / ⌘+ / ⌘-)
@@ -210,6 +217,11 @@ pub fn run() {
             start_hook_server(hook_tx);
 
             let mod_engine = engine_builder.build(app.handle().clone());
+            // Take handles the WSS server needs BEFORE we hand mod_engine
+            // over to Tauri's managed-state store — after `app.manage`
+            // moves it, direct access goes away.
+            let mod_engine_handle = mod_engine.handle();
+            let cwd_table = mod_engine.cwd_table();
             app.manage(mod_engine);
 
             // Headless-xterm sidecar. Spawned as best-effort so a missing
@@ -227,7 +239,59 @@ pub fn run() {
             // is the optional bit. State<'_, Arc<StreamHub>> is the handle
             // Tauri commands grab.
             let hub = StreamHub::new(sidecar);
+            let hub_for_wss = Arc::clone(&hub);
             app.manage(hub);
+
+            // Project registry: read view over PtyMap + CwdTable for the
+            // WSS server's Projects push. Fires notify_change from
+            // open_tab / close_tab / respawn_in_place so mobile clients
+            // stay live-synced with the desktop's tab inventory.
+            let pty_map_for_registry = Arc::clone(&pty_map_for_setup);
+            let registry = Arc::new(ProjectRegistry::new(
+                Arc::clone(&pty_map_for_registry),
+                cwd_table,
+            ));
+            let registry_for_wss = Arc::clone(&registry);
+            app.manage(registry);
+
+            // WSS server. AuthStub reads (or auto-generates) the dev
+            // config file — its bind_addr comes from there. Spawn as a
+            // tokio task; bind failure logs but doesn't block startup so
+            // a broken WSS never keeps the desktop from launching.
+            let config_dir = dirs::home_dir()
+                .map(|h| h.join(".config").join(identity::NAMESPACE));
+            if let Some(dir) = config_dir {
+                match AuthStub::load_or_init(&dir) {
+                    Ok((auth, path)) => {
+                        let auth = Arc::new(auth);
+                        eprintln!(
+                            "[wss] dev config: {} (token inside — copy into companion client)",
+                            path.display()
+                        );
+                        let server_state = Arc::new(ServerState {
+                            hub: hub_for_wss,
+                            auth: Arc::clone(&auth),
+                            registry: registry_for_wss,
+                            pty_map: Arc::clone(&pty_map_for_registry),
+                            mod_engine_handle,
+                        });
+                        let bind_addr = auth.bind_addr;
+                        app.manage(auth);
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) =
+                                wss_server::run(bind_addr, server_state).await
+                            {
+                                eprintln!("[wss] server crashed: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("[wss] disabled: dev config load failed: {e}");
+                    }
+                }
+            } else {
+                eprintln!("[wss] disabled: no home directory");
+            }
 
             // Window focus → suppression signal only.
             // (The previous focus-event-based click heuristic is gone — it
