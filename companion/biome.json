@@ -8,11 +8,7 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": [
-      "**",
-      "!uniwind-types.d.ts",
-      "!src/modules/wss/protocol.gen.ts"
-    ]
+    "includes": ["**", "!uniwind-types.d.ts"]
   },
   "formatter": {
     "enabled": true,
@@ -57,5 +53,12 @@
         "organizeImports": "on"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["src/modules/wss/protocol.gen.ts"],
+      "linter": { "enabled": false },
+      "assist": { "enabled": false }
+    }
+  ]
 }

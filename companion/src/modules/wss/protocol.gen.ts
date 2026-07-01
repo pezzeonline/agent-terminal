@@ -6,7 +6,7 @@ export interface TabSummary {
   tab_id: string
   label: string
   cwd?: string
-  /** "claude", "codex", or null when no agent is running in this tab. */
+  /** "claude", "codex", or absent when no agent is running in this tab. */
   agent?: string
 }
 

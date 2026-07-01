@@ -161,21 +161,35 @@ pub struct ProjectSummary {
     pub tabs: Vec<TabSummary>,
 }
 
+// Optional fields on the summary structs use
+// `#[serde(skip_serializing_if = "Option::is_none")]` so absent values are
+// OMITTED from the JSON rather than serialised as `null`. The generated TS
+// types are `cwd?: string` (i.e. `string | undefined`) — a wire-level
+// `null` would violate that contract and could crash a client that
+// assumes the field is either a string or absent. Serde's default is
+// asymmetric on purpose: we still accept `{"cwd": null}` on the way in
+// (Option deserialization tolerates both), so mobile bugs on the emitter
+// side don't break us.
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TabSummary {
     pub tab_id: String,
     pub label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
-    /// "claude", "codex", or null when no agent is running in this tab.
+    /// "claude", "codex", or absent when no agent is running in this tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
 }
 
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TabStateSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
     pub ports: Vec<u16>,
 }
@@ -416,11 +430,12 @@ mod tests {
     }
 
     #[test]
-    fn optional_fields_serialise_as_null_when_absent() {
-        // TabStateSummary uses Option<String> for cwd/agent/git_branch.
-        // typeshare emits `cwd?: string` on the TS side, so the client
-        // must be prepared for either the key to be missing OR present-
-        // and-null. serde emits `null` for None by default.
+    fn optional_fields_omit_when_absent() {
+        // TabStateSummary carries `#[serde(skip_serializing_if =
+        // "Option::is_none")]` on every Option<String> field. `None`
+        // must OMIT the key entirely, not emit `null` — the TS side
+        // types these as `cwd?: string` (i.e. `string | undefined`);
+        // a wire-level `null` would violate the generated contract.
         let s = TabStateSummary {
             cwd: None,
             agent: None,
@@ -429,12 +444,48 @@ mod tests {
         };
         assert_eq!(
             serde_json::to_value(&s).unwrap(),
+            json!({ "ports": [] })
+        );
+    }
+
+    #[test]
+    fn optional_fields_present_when_some() {
+        // Positive-path fixture: `Some(x)` serialises to the value
+        // directly (no wrapper). Paired with the omit-when-absent
+        // fixture above, both directions of the encoding are locked.
+        let s = TabStateSummary {
+            cwd: Some("/tmp".into()),
+            agent: Some("claude".into()),
+            git_branch: Some("main".into()),
+            ports: vec![3000],
+        };
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
             json!({
-                "cwd": null,
-                "agent": null,
-                "git_branch": null,
-                "ports": []
+                "cwd": "/tmp",
+                "agent": "claude",
+                "git_branch": "main",
+                "ports": [3000]
             })
         );
+    }
+
+    #[test]
+    fn optional_fields_accept_null_on_deserialize() {
+        // The asymmetric-tolerance side of the same design: we OMIT on
+        // the way out but accept `null` on the way in. A misbehaved
+        // mobile client that emits `{"cwd": null, ...}` still parses
+        // cleanly into a `TabStateSummary` with `cwd: None`.
+        let raw = json!({
+            "cwd": null,
+            "agent": null,
+            "git_branch": null,
+            "ports": []
+        });
+        let s: TabStateSummary = serde_json::from_value(raw).expect("decode");
+        assert!(s.cwd.is_none());
+        assert!(s.agent.is_none());
+        assert!(s.git_branch.is_none());
+        assert!(s.ports.is_empty());
     }
 }
