@@ -8,7 +8,11 @@
   },
   "files": {
     "ignoreUnknown": false,
-    "includes": ["**", "!uniwind-types.d.ts"]
+    "includes": [
+      "**",
+      "!uniwind-types.d.ts",
+      "!src/modules/wss/protocol.gen.ts"
+    ]
   },
   "formatter": {
     "enabled": true,

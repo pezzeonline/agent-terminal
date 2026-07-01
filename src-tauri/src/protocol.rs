@@ -19,10 +19,16 @@
 // - `ClientFrame::Write { data }` — the string the user typed on the
 //   phone. Also raw UTF-8; keystrokes are text, not binary.
 //
-// `#[serde(tag = "op", rename_all = "snake_case")]` turns each enum into
-// a discriminated union with an `op` field that matches the wire snake_
-// case (e.g. `"op": "auth_ok"`), which is what the master architecture
-// plan sketched and what the companion side expects.
+// Frames use serde's adjacently-tagged form: `{"op": "…", "body": {…}}`.
+// The `body` wrapper (rather than `data`) avoids ugly `"data": {"data":
+// "…"}` nesting on `ClientFrame::Write` and `ServerFrame::Bytes`, whose
+// inner payloads already carry a `data` field. Field naming inside
+// `body` matches the master architecture plan's frame sketches.
+//
+// typeshare v1 rejects the internally-tagged shape (`#[serde(tag =
+// "op")]` alone) — it requires the adjacent form. Cosmetic delta on the
+// wire; discriminated-union consumers on the companion side treat both
+// the same.
 
 use serde::{Deserialize, Serialize};
 use typeshare::typeshare;
@@ -30,7 +36,7 @@ use typeshare::typeshare;
 /// Frames sent from a mobile client to the desktop server.
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", content = "body", rename_all = "snake_case")]
 pub enum ClientFrame {
     /// First frame after the WebSocket connection upgrade. Carries the
     /// bearer token the device received during pairing. The WSS server's
@@ -53,9 +59,19 @@ pub enum ClientFrame {
     /// still in the hub's ring buffer, the server replays the missed
     /// bytes; otherwise it sends a fresh snapshot at the current seq
     /// and a new starting counter.
+    ///
+    /// `last_seq` is a `u64` on the wire but typeshare emits the TS type
+    /// as `number` (via `serialized_as`). JavaScript numbers carry 53
+    /// bits of integer precision, which is roughly 285 years of
+    /// continuous 1 GB/s traffic — well beyond any realistic session
+    /// lifetime. The `serialized_as` attribute is typeshare's escape
+    /// hatch: typeshare's parser rejects raw `u64` by default; this
+    /// tells it to codegen as if the field were `u32` while leaving the
+    /// runtime type (and the JSON wire encoding) as `u64`.
     Resume {
         tab_id: String,
         scrollback: u32,
+        #[typeshare(serialized_as = "u32")]
         last_seq: u64,
     },
 
@@ -78,7 +94,7 @@ pub enum ClientFrame {
 /// Frames sent from the desktop server to a mobile client.
 #[typeshare]
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(tag = "op", content = "body", rename_all = "snake_case")]
 pub enum ServerFrame {
     AuthOk {
         device_name: String,
@@ -99,6 +115,7 @@ pub enum ServerFrame {
     /// fresh xterm.js Terminal to restore visual state.
     Snapshot {
         tab_id: String,
+        #[typeshare(serialized_as = "u32")]
         seq: u64,
         payload: String,
     },
@@ -108,6 +125,7 @@ pub enum ServerFrame {
     /// before feeding xterm.js.
     Bytes {
         tab_id: String,
+        #[typeshare(serialized_as = "u32")]
         seq: u64,
         data: String,
     },
