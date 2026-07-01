@@ -17,9 +17,11 @@
 // handshake per-device tokens stored in the macOS Keychain.
 
 use crate::auth_stub::AuthStub;
+use crate::mod_engine::ModEngine;
 use crate::project_registry::ProjectRegistry;
 use crate::protocol::{ClientFrame, ServerFrame};
-use crate::stream_hub::StreamHub;
+use crate::pty_manager::PtyMap;
+use crate::stream_hub::{StreamHub, SubscriberId};
 use axum::{
     Router,
     extract::{
@@ -29,11 +31,14 @@ use axum::{
     response::Response,
     routing::get,
 };
-use std::io;
+use portable_pty::PtySize;
+use std::collections::HashMap;
+use std::io::{self, Write};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Error)]
 pub enum WssError {
@@ -53,6 +58,13 @@ pub struct ServerState {
     pub hub: Arc<StreamHub>,
     pub auth: Arc<AuthStub>,
     pub registry: Arc<ProjectRegistry>,
+    /// Shared with the Tauri app so a Write / Resize frame from a
+    /// remote client writes to the same PtyHandle the desktop
+    /// frontend does. Concurrent access under the existing
+    /// `Mutex<HashMap>` is fine at Phase 1 keystroke rates; if
+    /// contention shows in profiling we split the lock.
+    pub pty_map: PtyMap,
+    pub mod_engine: Arc<ModEngine>,
 }
 
 /// Bind the WSS server to `addr` and serve until the listener closes.
@@ -154,20 +166,153 @@ async fn connection_task(mut socket: WebSocket, state: Arc<ServerState>) {
         return;
     }
 
-    // Step 4: dispatch loop lands in the next commit. For now, just
-    // drain any subsequent frames so a wscat probe doesn't see the
-    // connection close immediately after Projects — the client observes
-    // "connected + authed" until it disconnects on its own.
+    // Step 4: enter the frame dispatch loop.
+    //
+    // Per-connection state:
+    // - `outbox_tx` / `outbox_rx` is the mpsc the StreamHub pushes
+    //   Bytes/Snapshot frames onto (Remote subscribers each own an
+    //   outbox clone). The main select! below drains outbox_rx onto
+    //   the WebSocket alongside handling client frames.
+    // - `subscriptions` tracks the SubscriberId per tab_id so
+    //   Unsubscribe / disconnect can clean up hub state.
+    let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<ServerFrame>();
+    let mut subscriptions: HashMap<String, SubscriberId> = HashMap::new();
+
     loop {
-        match socket.recv().await {
-            Some(Ok(Message::Close(_))) | None => break,
-            Some(Ok(_)) => {
-                // Silently drop until the dispatcher lands.
+        tokio::select! {
+            // Client → server: read a frame, dispatch.
+            incoming = read_frame(&mut socket) => {
+                let frame = match incoming {
+                    Ok(Some(f)) => f,
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("[wss] read error: {e}");
+                        break;
+                    }
+                };
+                dispatch_client_frame(
+                    frame,
+                    &state,
+                    &outbox_tx,
+                    &mut subscriptions,
+                )
+                .await;
             }
-            Some(Err(e)) => {
-                eprintln!("[wss] recv error: {e}");
-                break;
+
+            // Server → client: outbox drained onto the WebSocket. The
+            // outbox_tx clone in `subscriptions` keeps this alive; when
+            // all clones drop (i.e. connection torn down), this branch
+            // returns None and the select! moves on. We break in that
+            // case so the connection cleanly closes.
+            frame = outbox_rx.recv() => {
+                let Some(frame) = frame else { break };
+                if send_frame(&mut socket, &frame).await.is_err() {
+                    break;
+                }
             }
+        }
+    }
+
+    // Cleanup: drop every remaining subscription so the hub reclaims
+    // its per-tab bookkeeping. Runs on any exit from the loop (client
+    // close, read error, outbox drained).
+    for (tab_id, sub_id) in subscriptions {
+        state.hub.unsubscribe(&tab_id, sub_id);
+    }
+}
+
+/// Route a single ClientFrame to its handler. Kept as a standalone
+/// function so the main connection_task select! stays legible.
+async fn dispatch_client_frame(
+    frame: ClientFrame,
+    state: &Arc<ServerState>,
+    outbox_tx: &mpsc::UnboundedSender<ServerFrame>,
+    subscriptions: &mut HashMap<String, SubscriberId>,
+) {
+    match frame {
+        // The main auth path already handled the first Auth frame. A
+        // second one is a protocol error but not worth tearing down for
+        // — silently ignore.
+        ClientFrame::Auth { .. } => {}
+
+        ClientFrame::Subscribe { tab_id, scrollback } => {
+            // Drop any prior subscription on the same tab first so we
+            // don't leak SubscriberIds if a client re-subscribes.
+            if let Some(prev) = subscriptions.remove(&tab_id) {
+                state.hub.unsubscribe(&tab_id, prev);
+            }
+            let id = state
+                .hub
+                .subscribe_remote(&tab_id, outbox_tx.clone(), scrollback)
+                .await;
+            subscriptions.insert(tab_id, id);
+        }
+
+        ClientFrame::Resume {
+            tab_id,
+            scrollback,
+            last_seq,
+        } => {
+            if let Some(prev) = subscriptions.remove(&tab_id) {
+                state.hub.unsubscribe(&tab_id, prev);
+            }
+            let id = state
+                .hub
+                .resume_remote(&tab_id, outbox_tx.clone(), last_seq, scrollback)
+                .await;
+            subscriptions.insert(tab_id, id);
+        }
+
+        ClientFrame::Unsubscribe { tab_id } => {
+            if let Some(id) = subscriptions.remove(&tab_id) {
+                state.hub.unsubscribe(&tab_id, id);
+            }
+        }
+
+        ClientFrame::Write { tab_id, data } => {
+            // Look up the PtyHandle and write bytes to its master.
+            // Matches `commands::write_pty` behaviour byte-for-byte:
+            // silently no-op if the tab is already closed, then feed
+            // the mod engine.
+            let bytes = data.into_bytes();
+            {
+                let mut map = state.pty_map.lock().expect("pty_map lock poisoned");
+                if let Some(handle) = map.get_mut(&tab_id) {
+                    if let Err(e) = handle.writer.write_all(&bytes) {
+                        eprintln!("[wss] write to {tab_id} failed: {e}");
+                    }
+                }
+            }
+            state.mod_engine.handle().on_input(&tab_id, bytes);
+        }
+
+        ClientFrame::Resize {
+            tab_id,
+            cols,
+            rows,
+        } => {
+            {
+                let map = state.pty_map.lock().expect("pty_map lock poisoned");
+                if let Some(handle) = map.get(&tab_id) {
+                    if let Err(e) = handle.master.resize(PtySize {
+                        rows,
+                        cols,
+                        pixel_width: 0,
+                        pixel_height: 0,
+                    }) {
+                        eprintln!("[wss] resize {tab_id} failed: {e}");
+                    }
+                }
+            }
+            state.mod_engine.handle().on_resize(&tab_id, cols, rows);
+            // Keep the sidecar's shadow xterm in step so a subsequent
+            // Snapshot from a re-subscribing client sees the right
+            // dimensions.
+            state.hub.resize_tab(&tab_id, cols, rows);
+        }
+
+        ClientFrame::Ping => {
+            let _ = outbox_tx.send(ServerFrame::Pong);
         }
     }
 }
