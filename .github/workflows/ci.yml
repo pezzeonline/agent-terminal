@@ -82,6 +82,44 @@ jobs:
         working-directory: src-tauri/sidecar
         run: bun test
 
+      # Wire-protocol drift check: the committed
+      # companion/src/modules/wss/protocol.gen.ts must be byte-identical to
+      # what `cargo xtask regen-protocol` produces from the current
+      # src-tauri/src/protocol.rs. If a contributor edits protocol.rs
+      # without regenerating, CI fails here with a clear "run
+      # `cargo xtask regen-protocol`" message instead of a confusing
+      # tsc-side type error later.
+      #
+      # Lives in js-checks (not rust-checks) because the codegen path
+      # needs BOTH cargo AND bun (for biome format on the output). This
+      # job already has both.
+      - name: Rust toolchain (for xtask)
+        if: ${{ !cancelled() }}
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache typeshare-cli install
+        if: ${{ !cancelled() }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/typeshare
+          key: typeshare-cli-1.13.4-${{ runner.os }}
+      - name: Install typeshare-cli
+        if: ${{ !cancelled() }}
+        run: |
+          if ! command -v typeshare >/dev/null 2>&1; then
+            cargo install typeshare-cli --version 1.13.4 --locked
+          fi
+      - name: Regenerate protocol bindings
+        if: ${{ !cancelled() }}
+        run: cargo xtask regen-protocol
+      - name: Verify no drift
+        if: ${{ !cancelled() }}
+        run: |
+          if ! git diff --exit-status companion/src/modules/wss/protocol.gen.ts; then
+            echo "::error::companion/src/modules/wss/protocol.gen.ts is out of sync with src-tauri/src/protocol.rs."
+            echo "::error::Run 'cargo xtask regen-protocol' locally and commit the result."
+            exit 1
+          fi
+
   # Single job, not split per check: cargo's incremental build cache is shared
   # across check / clippy / test, so splitting would recompile Tauri/Wry deps
   # from scratch in each parallel job.
