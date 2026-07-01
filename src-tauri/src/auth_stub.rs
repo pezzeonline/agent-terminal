@@ -52,6 +52,18 @@ pub struct AuthStub {
 }
 
 impl AuthStub {
+    /// Test-only direct constructor. Skips the config file so integration
+    /// tests can pick a known token + ephemeral bind port. `#[doc(hidden)]`
+    /// keeps it out of the rustdoc surface.
+    #[doc(hidden)]
+    pub fn new_for_tests(token: String, device_name: String, bind_addr: SocketAddr) -> Self {
+        Self {
+            token,
+            device_name,
+            bind_addr,
+        }
+    }
+
     /// Load the config from `<config_dir>/companion-dev.json`, generating
     /// the file with a fresh random token if it does not exist. Returns
     /// the parsed state plus a path suitable for logging.

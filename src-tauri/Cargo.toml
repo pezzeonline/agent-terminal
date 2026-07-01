@@ -88,4 +88,11 @@ uuid = { version = "1", features = ["v4"] }
 [dev-dependencies]
 # Isolated temp directories for auth_stub round-trip tests.
 tempfile = "3"
+# WebSocket client for the wss_server integration tests. Spins up an in-
+# process WS client bound to a randomly-assigned port so tests never
+# collide with a real WSS server the dev has running.
+tokio-tungstenite = "0.24"
+# Stream/Sink extension traits needed for tokio-tungstenite's split
+# WebSocket handles.
+futures-util = "0.3"
 

@@ -7,8 +7,16 @@ pub mod hook_server;
 // `pub` so integration tests can read NAMESPACE/HOOK_PORT.
 pub mod identity;
 mod mod_engine;
+// Narrow re-export for integration tests that need to build a
+// ModEngineHandle::noop() or read the CwdTable type. Keeps the rest of
+// the mod_engine tree private (clippy has opinions on those internal
+// mod-specific types).
+#[doc(hidden)]
+pub use mod_engine::{CwdTable, ModEngineHandle};
 mod notifications;
-mod pty_manager;
+// pub so integration tests can construct a bare PtyMap without a full
+// PtyHandle harness (tests only need the map's shape for ServerState).
+pub mod pty_manager;
 mod shell_integration;
 // pub so integration tests can drive a SidecarClient instance directly
 // without going through the full Tauri startup path.
