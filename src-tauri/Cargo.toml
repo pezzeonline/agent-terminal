@@ -70,4 +70,8 @@ which = "8"
 # threads broadcast concurrently across different tabs; a single Mutex
 # would serialise unrelated tabs through the lock.
 dashmap = "6"
+# Attribute macros for the wire-protocol types. `cargo xtask regen-protocol`
+# picks up every `#[typeshare]`-annotated type and emits the matching TS
+# discriminated-union file under `companion/src/modules/wss/protocol.gen.ts`.
+typeshare = "1"
 

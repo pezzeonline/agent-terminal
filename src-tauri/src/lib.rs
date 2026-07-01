@@ -15,6 +15,11 @@ mod shell_integration;
 pub mod sidecar_client;
 // pub for the same reason — tests construct StreamHub directly.
 pub mod stream_hub;
+// pub so the WSS server (next sub-step) and future integration tests can
+// build wire frames from these types directly. Also exported at the crate
+// root so `cargo xtask regen-protocol` (which shells out to typeshare)
+// can find the #[typeshare]-annotated types by scanning src-tauri/src/.
+pub mod protocol;
 
 use hook_config::ensure_hooks_installed;
 use hook_server::start_hook_server;
