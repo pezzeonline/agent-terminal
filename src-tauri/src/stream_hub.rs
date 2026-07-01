@@ -248,8 +248,12 @@ impl StreamHub {
                 .lock()
                 .expect("ring lock poisoned")
                 .push(seq, raw_bytes.to_vec());
+            // Threaded to the sidecar so `serialize` can return the exact
+            // seq whose bytes are in the payload — closes the drift window
+            // between "which write was in the snapshot" and "next Bytes
+            // broadcast seq" that a remote subscribe would otherwise hit.
             if let Some(sidecar) = &self.sidecar {
-                sidecar.write_bytes(tab_id, raw_bytes);
+                sidecar.write_bytes(tab_id, raw_bytes, seq);
             }
         }
     }

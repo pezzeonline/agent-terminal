@@ -245,14 +245,20 @@ impl SidecarClient {
     /// Push raw PTY bytes to the sidecar's parser for `tab_id`. Returns
     /// immediately — there is no reply. If the sidecar has died, the bytes
     /// silently drop; the caller's hot path stays branch-free.
-    pub fn write_bytes(&self, tab_id: &str, bytes: &[u8]) {
+    ///
+    /// `seq` is the sequence number the StreamHub assigned to this chunk.
+    /// The sidecar records the highest seq it has seen per tab and returns
+    /// it from `serialize`, so subscribe_remote can tag its snapshot with
+    /// the exact seq whose bytes are reflected in the payload (no drift
+    /// window between "state in snapshot" and "next Bytes broadcast seq").
+    pub fn write_bytes(&self, tab_id: &str, bytes: &[u8], seq: u64) {
         if self.is_dead() {
             return;
         }
         let bytes_b64 = B64.encode(bytes);
         let line = json!({
             "verb": "write",
-            "args": { "tab_id": tab_id, "bytes_b64": bytes_b64 }
+            "args": { "tab_id": tab_id, "bytes_b64": bytes_b64, "seq": seq }
         })
         .to_string();
         let _ = self.inner.writer_tx.send(line);
@@ -281,21 +287,34 @@ impl SidecarClient {
         let _ = self.inner.writer_tx.send(line);
     }
 
-    /// Ask the sidecar to serialize tab_id's buffer. Returns the xterm-
-    /// serialize payload (a string containing escape sequences ready to
-    /// replay into a fresh xterm Terminal).
-    pub async fn serialize(&self, tab_id: &str, scrollback: u32) -> Result<String> {
+    /// Ask the sidecar to serialize tab_id's buffer.
+    ///
+    /// Returns `(payload, last_seq)`:
+    ///
+    /// - `payload` is the xterm-serialize output (escape sequences ready to
+    ///   replay into a fresh xterm Terminal).
+    /// - `last_seq` is the highest seq the sidecar had fully parsed at the
+    ///   moment the payload was captured. Callers use this to tag
+    ///   `ServerFrame::Snapshot.seq` so subsequent broadcast fan-out can
+    ///   deduplicate with `if seq <= last_acked { skip }`.
+    pub async fn serialize(&self, tab_id: &str, scrollback: u32) -> Result<(String, u64)> {
         let reply = self
             .call(
                 "serialize",
                 json!({ "tab_id": tab_id, "scrollback": scrollback }),
             )
             .await?;
-        reply
+        let payload = reply
             .get("payload")
             .and_then(Value::as_str)
             .map(String::from)
-            .ok_or_else(|| SidecarError::InvalidReply("missing payload field".to_string()))
+            .ok_or_else(|| SidecarError::InvalidReply("missing payload field".to_string()))?;
+        // last_seq is 0 for a freshly-opened tab that hasn't received any
+        // writes yet. Missing from older sidecar builds also reads as 0 —
+        // safe default; the drift race we're closing here has no bearing
+        // on an empty terminal.
+        let last_seq = reply.get("last_seq").and_then(Value::as_u64).unwrap_or(0);
+        Ok((payload, last_seq))
     }
 
     pub async fn close(&self, tab_id: &str) -> Result<()> {
@@ -385,8 +404,8 @@ mod tests {
         // Spam writes; the call returns immediately even if the sidecar is
         // slow to process. Mostly a sanity check that the API does not
         // accidentally become blocking.
-        for _ in 0..1000 {
-            client.write_bytes("t1", b"hello");
+        for i in 0..1000 {
+            client.write_bytes("t1", b"hello", i);
         }
         // The echo sidecar emits no reply for `write`. Sleep briefly to
         // confirm no spurious reply arrives that would corrupt later state.
@@ -436,9 +455,9 @@ mod tests {
         let client = SidecarClient::spawn(cmd).await.expect("spawn");
 
         client.open("tab-1", 80, 24).await.expect("open");
-        client.write_bytes("tab-1", b"hello world\r\n");
+        client.write_bytes("tab-1", b"hello world\r\n", 42);
 
-        let payload = timeout(
+        let (payload, last_seq) = timeout(
             Duration::from_secs(10),
             client.serialize("tab-1", 1000),
         )
@@ -450,6 +469,9 @@ mod tests {
             payload.contains("hello world"),
             "serialize payload did not contain written text. payload: {payload}"
         );
+        // Threading check: the sidecar echoes back the highest seq it saw
+        // via `writeBytes.seq`. Our write above tagged seq 42.
+        assert_eq!(last_seq, 42, "last_seq must round-trip through the sidecar");
 
         client.close("tab-1").await.expect("close");
     }
