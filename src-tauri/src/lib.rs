@@ -20,6 +20,9 @@ pub mod stream_hub;
 // root so `cargo xtask regen-protocol` (which shells out to typeshare)
 // can find the #[typeshare]-annotated types by scanning src-tauri/src/.
 pub mod protocol;
+// pub for direct test coverage (config file round-trip, constant-time
+// compare, error paths).
+pub mod auth_stub;
 
 use hook_config::ensure_hooks_installed;
 use hook_server::start_hook_server;

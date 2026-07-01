@@ -74,4 +74,14 @@ dashmap = "6"
 # picks up every `#[typeshare]`-annotated type and emits the matching TS
 # discriminated-union file under `companion/src/modules/wss/protocol.gen.ts`.
 typeshare = "1"
+# Constant-time token comparison for the WSS auth stub. Prevents timing
+# attacks even in dev mode — cheap defence-in-depth over `==` on bytes.
+constant_time_eq = "0.3"
+# Random token generation for the initial dev config file. v4 UUIDs give
+# ~122 bits of entropy which is plenty for a Phase-1 bearer token.
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# Isolated temp directories for auth_stub round-trip tests.
+tempfile = "3"
 
