@@ -1,4 +1,5 @@
 use crate::mod_engine::{CwdTable, ModEngineHandle};
+use crate::project_registry::ProjectRegistry;
 use crate::stream_hub::StreamHub;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
@@ -110,6 +111,11 @@ struct ReaderCtx {
     /// channel above is one of its subscribers (still owned here for the
     /// reconnect-swap mechanism try_reattach uses).
     hub: Arc<StreamHub>,
+    /// Fired on respawn_in_place so paired WSS clients push a fresh
+    /// Projects frame reflecting the new PtyHandle's state. Optional so
+    /// spawn_pty callers that don't yet have a registry (existing tests,
+    /// pre-integration paths) can still work.
+    registry: Option<Arc<ProjectRegistry>>,
 }
 
 /// Spawns the reader thread that forwards PTY bytes to the frontend.
@@ -315,6 +321,7 @@ fn respawn_in_place(ctx: &ReaderCtx) -> Result<RespawnOutcome, String> {
             pty_map: ctx.pty_map.clone(),
             cwd_table: ctx.cwd_table.clone(),
             hub: Arc::clone(&ctx.hub),
+            registry: ctx.registry.clone(),
         },
         new_reader,
     );
@@ -326,6 +333,13 @@ fn respawn_in_place(ctx: &ReaderCtx) -> Result<RespawnOutcome, String> {
             cwd,
         },
     ).ok();
+
+    // Notify WSS clients so mobile UI's TabState / project tree
+    // reflects the new PtyHandle. No-op when the registry hasn't been
+    // wired (tests, legacy callers).
+    if let Some(registry) = ctx.registry.as_ref() {
+        registry.notify_change();
+    }
 
     Ok(RespawnOutcome::Respawned)
 }
@@ -394,6 +408,7 @@ pub fn try_reattach(
             pty_map: pty_map.clone(),
             cwd_table,
             hub,
+            registry: None,
         },
         reader,
     );
@@ -476,6 +491,7 @@ pub fn spawn_pty(
     mod_handle: ModEngineHandle,
     cwd_table: CwdTable,
     hub: Arc<StreamHub>,
+    registry: Option<Arc<ProjectRegistry>>,
     tab_id: String,
     cwd: Option<String>,
     shell: Option<String>,
@@ -546,6 +562,7 @@ pub fn spawn_pty(
             pty_map: pty_map.clone(),
             cwd_table,
             hub,
+            registry,
         },
         reader,
     );

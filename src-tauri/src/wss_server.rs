@@ -175,8 +175,17 @@ async fn connection_task(mut socket: WebSocket, state: Arc<ServerState>) {
     //   the WebSocket alongside handling client frames.
     // - `subscriptions` tracks the SubscriberId per tab_id so
     //   Unsubscribe / disconnect can clean up hub state.
+    // - `changes` fires whenever the tab inventory mutates
+    //   (open_tab, close_tab, respawn_in_place). We push a fresh
+    //   Projects frame to the outbox in response so the mobile UI's
+    //   tab tree stays live-synced with the desktop's.
     let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<ServerFrame>();
     let mut subscriptions: HashMap<String, SubscriberId> = HashMap::new();
+    let mut changes = state.registry.subscribe_changes();
+    // Consume the current value so `changed().await` blocks until the
+    // NEXT notify — otherwise the first iteration would fire
+    // immediately and re-send the projects we just pushed above.
+    changes.mark_unchanged();
 
     loop {
         tokio::select! {
@@ -209,6 +218,18 @@ async fn connection_task(mut socket: WebSocket, state: Arc<ServerState>) {
                 if send_frame(&mut socket, &frame).await.is_err() {
                     break;
                 }
+            }
+
+            // ProjectRegistry fired notify_change. Re-read the tab
+            // tree and enqueue a fresh Projects frame; the outbox
+            // branch above will send it on the next iteration. Any
+            // send error on `changed().await` means the sender has
+            // been dropped — impossible in practice (registry is
+            // long-lived) but treat as a clean exit anyway.
+            change = changes.changed() => {
+                if change.is_err() { break; }
+                let projects = state.registry.projects();
+                let _ = outbox_tx.send(ServerFrame::Projects { data: projects });
             }
         }
     }
