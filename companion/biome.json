@@ -53,5 +53,12 @@
         "organizeImports": "on"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": ["src/modules/wss/protocol.gen.ts"],
+      "linter": { "enabled": false },
+      "assist": { "enabled": false }
+    }
+  ]
 }

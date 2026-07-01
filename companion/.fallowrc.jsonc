@@ -1,0 +1,8 @@
+{
+  // Paths fallow should treat as reachable even without an explicit import
+  // graph edge — normally used for framework-magic dynamic loads, borrowed
+  // here for generated wire-protocol bindings that don't have a consumer
+  // yet. The WSS client sub-step introduces the first import; when that
+  // lands, this entry can go away.
+  "dynamicallyLoaded": ["src/modules/wss/protocol.gen.ts"]
+}

@@ -1,0 +1,10 @@
+# Workspace root. The Tauri crate lives under `src-tauri/`; the `xtask` crate
+# is a small task-runner binary used for project-level codegen (e.g. the
+# TypeScript wire-protocol bindings generated from Rust source of truth).
+#
+# `resolver = "2"` matches the feature-resolution behaviour every workspace
+# member already gets when built as a standalone Rust 2021 package, so the
+# promotion to workspace does not silently shift any dependency features.
+[workspace]
+members = ["src-tauri", "xtask"]
+resolver = "2"
