@@ -23,6 +23,9 @@ pub mod protocol;
 // pub for direct test coverage (config file round-trip, constant-time
 // compare, error paths).
 pub mod auth_stub;
+// pub for direct test coverage. The WSS server (next commit) constructs
+// one at startup and hands it to per-connection tasks.
+pub mod project_registry;
 
 use hook_config::ensure_hooks_installed;
 use hook_server::start_hook_server;
