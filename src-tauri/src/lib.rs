@@ -26,6 +26,9 @@ pub mod auth_stub;
 // pub for direct test coverage. The WSS server (next commit) constructs
 // one at startup and hands it to per-connection tasks.
 pub mod project_registry;
+// pub so integration tests can drive the server directly (spin up on
+// 127.0.0.1:0 with an in-process client).
+pub mod wss_server;
 
 use hook_config::ensure_hooks_installed;
 use hook_server::start_hook_server;

@@ -18,7 +18,6 @@
 use crate::mod_engine::CwdTable;
 use crate::protocol::{ProjectSummary, TabSummary};
 use crate::pty_manager::PtyMap;
-use std::sync::Arc;
 use tokio::sync::watch;
 
 /// Bundle of read handles + a change-notification watch. The registry
@@ -115,7 +114,7 @@ mod tests {
     use super::*;
     use crate::pty_manager::PtyHandle;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     fn empty_pty_map() -> PtyMap {
         Arc::new(Mutex::new(HashMap::new()))

@@ -51,7 +51,11 @@ portable-pty = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-axum = "0.8"
+# `ws` feature is needed for the WSS server's `/stream` endpoint. axum-ws
+# is a thin wrapper over tokio-tungstenite (which axum-ws pulls in for us)
+# — same underlying implementation the master plan sketched, with axum's
+# routing / middleware / graceful-shutdown machinery bolted on top.
+axum = { version = "0.8", features = ["ws"] }
 dirs = "5"
 encoding_rs = "0.8"
 sysinfo = "0.33"
