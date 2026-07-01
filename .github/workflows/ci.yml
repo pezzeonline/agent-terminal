@@ -108,13 +108,29 @@ jobs:
           if ! command -v typeshare >/dev/null 2>&1; then
             cargo install typeshare-cli --version 1.13.4 --locked
           fi
+      # xtask shells out to `bunx @biomejs/biome format --write ...` from
+      # cwd=`companion/`. Without companion's own node_modules present,
+      # bunx walks up to the root's node_modules and picks up whatever
+      # biome version lives there — currently 2.4.15, which does not
+      # recognise companion/biome.json's 2.5.x-shape `preset` rules key
+      # and refuses to load the config. Installing companion's deps here
+      # gives bunx the right biome (2.5.1) via companion/node_modules.
+      - name: Install companion deps (for bunx biome inside xtask)
+        if: ${{ !cancelled() }}
+        working-directory: companion
+        run: bun install --frozen-lockfile
       - name: Regenerate protocol bindings
         if: ${{ !cancelled() }}
         run: cargo xtask regen-protocol
       - name: Verify no drift
         if: ${{ !cancelled() }}
+        # `git diff --quiet` is equivalent to `--exit-status` in intent
+        # (exit 0 = no diff, exit 1 = diff present) and more portable
+        # across `git` builds — a previous CI run rejected the longer
+        # spelling with `error: invalid option`, which we could not
+        # reproduce elsewhere.
         run: |
-          if ! git diff --exit-status companion/src/modules/wss/protocol.gen.ts; then
+          if ! git diff --quiet companion/src/modules/wss/protocol.gen.ts; then
             echo "::error::companion/src/modules/wss/protocol.gen.ts is out of sync with src-tauri/src/protocol.rs."
             echo "::error::Run 'cargo xtask regen-protocol' locally and commit the result."
             exit 1
