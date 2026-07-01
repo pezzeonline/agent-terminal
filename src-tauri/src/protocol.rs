@@ -179,3 +179,262 @@ pub struct TabStateSummary {
     pub git_branch: Option<String>,
     pub ports: Vec<u16>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    /// Every ClientFrame variant round-trips through JSON unchanged.
+    /// Catches derive-macro mistakes (forgotten Serialize/Deserialize,
+    /// mis-written serde tag/content attributes) and locks the wire
+    /// format so a casual refactor cannot silently alter the bytes.
+    #[test]
+    fn client_frame_roundtrip_every_variant() {
+        let cases: Vec<ClientFrame> = vec![
+            ClientFrame::Auth { token: "abc".into() },
+            ClientFrame::Subscribe {
+                tab_id: "t1".into(),
+                scrollback: 500,
+            },
+            ClientFrame::Resume {
+                tab_id: "t1".into(),
+                scrollback: 500,
+                last_seq: 12345,
+            },
+            ClientFrame::Unsubscribe {
+                tab_id: "t1".into(),
+            },
+            ClientFrame::Write {
+                tab_id: "t1".into(),
+                data: "ls -la\r".into(),
+            },
+            ClientFrame::Resize {
+                tab_id: "t1".into(),
+                cols: 132,
+                rows: 40,
+            },
+            ClientFrame::Ping,
+        ];
+        for case in cases {
+            let s = serde_json::to_string(&case).expect("encode");
+            let back: ClientFrame = serde_json::from_str(&s).expect("decode");
+            let a = serde_json::to_value(&case).unwrap();
+            let b = serde_json::to_value(&back).unwrap();
+            assert_eq!(a, b, "roundtrip diverged for {s}");
+        }
+    }
+
+    /// Every ServerFrame variant round-trips too.
+    #[test]
+    fn server_frame_roundtrip_every_variant() {
+        let cases: Vec<ServerFrame> = vec![
+            ServerFrame::AuthOk {
+                device_name: "iPhone".into(),
+            },
+            ServerFrame::AuthFail {
+                reason: "bad token".into(),
+            },
+            ServerFrame::Projects {
+                data: vec![ProjectSummary {
+                    project_id: "p1".into(),
+                    name: "control-center".into(),
+                    tabs: vec![TabSummary {
+                        tab_id: "t1".into(),
+                        label: "dev".into(),
+                        cwd: Some("/tmp".into()),
+                        agent: Some("claude".into()),
+                    }],
+                }],
+            },
+            ServerFrame::Snapshot {
+                tab_id: "t1".into(),
+                seq: 12500,
+                payload: "\x1b[H\x1b[2J".into(),
+            },
+            ServerFrame::Bytes {
+                tab_id: "t1".into(),
+                seq: 12501,
+                data: "aGVsbG8=".into(),
+            },
+            ServerFrame::Resized {
+                tab_id: "t1".into(),
+                cols: 132,
+                rows: 40,
+            },
+            ServerFrame::TabState {
+                tab_id: "t1".into(),
+                state: TabStateSummary {
+                    cwd: Some("/tmp".into()),
+                    agent: None,
+                    git_branch: Some("main".into()),
+                    ports: vec![3000, 5173],
+                },
+            },
+            ServerFrame::PtyExit {
+                tab_id: "t1".into(),
+            },
+            ServerFrame::PtyRespawned {
+                tab_id: "t1".into(),
+                cwd: "/tmp".into(),
+            },
+            ServerFrame::Pong,
+        ];
+        for case in cases {
+            let s = serde_json::to_string(&case).expect("encode");
+            let back: ServerFrame = serde_json::from_str(&s).expect("decode");
+            let a = serde_json::to_value(&case).unwrap();
+            let b = serde_json::to_value(&back).unwrap();
+            assert_eq!(a, b, "roundtrip diverged for {s}");
+        }
+    }
+
+    // The fixture tests below pin the exact JSON shape — the load-bearing
+    // guarantee that lets the mobile side read a bytes[] on the wire
+    // without hand-rolling parsing that could drift from serde's output.
+    // If any of these fail, the wire format changed and the mobile client
+    // needs a coordinated update.
+
+    #[test]
+    fn client_auth_wire_shape() {
+        let frame = ClientFrame::Auth {
+            token: "dev-token".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            json!({ "op": "auth", "body": { "token": "dev-token" } })
+        );
+    }
+
+    #[test]
+    fn client_subscribe_wire_shape() {
+        let frame = ClientFrame::Subscribe {
+            tab_id: "claude-ui:dev".into(),
+            scrollback: 500,
+        };
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            json!({
+                "op": "subscribe",
+                "body": { "tab_id": "claude-ui:dev", "scrollback": 500 }
+            })
+        );
+    }
+
+    #[test]
+    fn client_resume_wire_shape_carries_u64_last_seq() {
+        let frame = ClientFrame::Resume {
+            tab_id: "t1".into(),
+            scrollback: 500,
+            last_seq: 1_234_567_890,
+        };
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            json!({
+                "op": "resume",
+                "body": {
+                    "tab_id": "t1",
+                    "scrollback": 500,
+                    "last_seq": 1_234_567_890u64
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn client_write_wire_shape() {
+        // Regression pin for the `body`-vs-`data` decision: the outer
+        // wrapper is `body` and the inner variant field stays `data`.
+        // If the wrapper accidentally reverts to `data`, this test names
+        // the fix.
+        let frame = ClientFrame::Write {
+            tab_id: "t1".into(),
+            data: "echo hi\r".into(),
+        };
+        let value = serde_json::to_value(&frame).unwrap();
+        assert_eq!(value["op"], "write");
+        assert_eq!(value["body"]["tab_id"], "t1");
+        assert_eq!(value["body"]["data"], "echo hi\r");
+    }
+
+    #[test]
+    fn client_ping_wire_shape_omits_body() {
+        // Unit variants serialise with no body field (serde adjacent-
+        // tagging behaviour). typeshare mirrors this on the TS side as
+        // `body?: undefined`.
+        let frame = ClientFrame::Ping;
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            json!({ "op": "ping" })
+        );
+    }
+
+    #[test]
+    fn server_bytes_wire_shape() {
+        let frame = ServerFrame::Bytes {
+            tab_id: "t1".into(),
+            seq: 42,
+            data: "aGVsbG8gd29ybGQ=".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            json!({
+                "op": "bytes",
+                "body": {
+                    "tab_id": "t1",
+                    "seq": 42,
+                    "data": "aGVsbG8gd29ybGQ="
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn server_projects_wire_shape() {
+        let frame = ServerFrame::Projects {
+            data: vec![ProjectSummary {
+                project_id: "p1".into(),
+                name: "proj".into(),
+                tabs: vec![],
+            }],
+        };
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            json!({
+                "op": "projects",
+                "body": {
+                    "data": [
+                        {
+                            "project_id": "p1",
+                            "name": "proj",
+                            "tabs": []
+                        }
+                    ]
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn optional_fields_serialise_as_null_when_absent() {
+        // TabStateSummary uses Option<String> for cwd/agent/git_branch.
+        // typeshare emits `cwd?: string` on the TS side, so the client
+        // must be prepared for either the key to be missing OR present-
+        // and-null. serde emits `null` for None by default.
+        let s = TabStateSummary {
+            cwd: None,
+            agent: None,
+            git_branch: None,
+            ports: vec![],
+        };
+        assert_eq!(
+            serde_json::to_value(&s).unwrap(),
+            json!({
+                "cwd": null,
+                "agent": null,
+                "git_branch": null,
+                "ports": []
+            })
+        );
+    }
+}
