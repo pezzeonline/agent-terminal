@@ -40,7 +40,7 @@
     "nanostores": "^1.2.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
-    "react-hotkeys-hook": "^5.2.4",
+    "react-hotkeys-hook": "^5.3.3",
     "shadcn": "^4.2.0",
     "tailwind-merge": "^3.5.0",
     "tailwindcss": "^4.2.2",
