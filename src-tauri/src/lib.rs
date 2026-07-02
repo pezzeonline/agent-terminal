@@ -55,11 +55,11 @@ use mod_engine::{
 use notifications::NotificationService;
 use shell_integration::setup_shell_integration;
 use tauri::Manager;
-#[cfg(all(target_os = "macos", not(feature = "dev-instance")))]
+#[cfg(target_os = "macos")]
 use tauri::Emitter;
 #[cfg(target_os = "macos")]
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
-#[cfg(all(target_os = "macos", not(feature = "dev-instance")))]
+#[cfg(target_os = "macos")]
 use tauri::menu::MenuItemBuilder;
 use auth_stub::AuthStub;
 use projects_cache::ProjectsCache;
@@ -184,13 +184,16 @@ pub fn run() {
                 eprintln!("[agent-terminal] menu setup failed: {e}");
             }
 
-            // Forward the "Check for Updates…" menu click to the renderer
-            // as a `menu:check-for-updates` event. The renderer's
-            // checkForUpdate() handler drives the rest of the flow.
-            #[cfg(all(target_os = "macos", not(feature = "dev-instance")))]
+            // Forward menu clicks to the renderer as events — it owns the
+            // rest of each flow. "check-for-updates" only exists in the
+            // prod submenu (see `install_app_menu`), so it's a no-op click
+            // target in dev builds; "settings" exists in both.
+            #[cfg(target_os = "macos")]
             app.on_menu_event(|app_handle, event| {
                 if event.id() == "check-for-updates" {
                     let _ = app_handle.emit("menu:check-for-updates", ());
+                } else if event.id() == "settings" {
+                    let _ = app_handle.emit("menu:open-settings", ());
                 }
             });
 
@@ -366,6 +369,13 @@ pub fn run() {
 fn install_app_menu(
     app: &tauri::App,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // "Settings…" — unlike "Check for Updates…" below, this has no plugin
+    // dependency, so it's available in both dev and prod builds.
+    let settings_item =
+        MenuItemBuilder::with_id("settings", "Settings…")
+            .accelerator("Cmd+,")
+            .build(app)?;
+
     // "Check for Updates…" goes between About and Services in the prod
     // app menu. dev-instance builds intentionally skip it because the
     // updater plugin isn't registered in those — surfacing a menu item
@@ -377,6 +387,8 @@ fn install_app_menu(
                 .build(app)?;
         SubmenuBuilder::new(app, "Agent Terminal")
             .about(None)
+            .separator()
+            .item(&settings_item)
             .separator()
             .item(&check_for_updates)
             .separator()
@@ -393,6 +405,8 @@ fn install_app_menu(
     #[cfg(feature = "dev-instance")]
     let app_submenu = SubmenuBuilder::new(app, "Agent Terminal")
         .about(None)
+        .separator()
+        .item(&settings_item)
         .separator()
         .services()
         .separator()

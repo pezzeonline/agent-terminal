@@ -6,11 +6,13 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { Terminal } from '@xterm/xterm'
 import React, { useEffect, useRef } from 'react'
+import { useLiveTerminalFont } from '@/components/XTermTerminal/xterm-terminal.hooks'
 import {
   createWebglLifecycle,
   type WebglLifecycle,
 } from '@/components/XTermTerminal/xterm-terminal.webgl'
 import { $activeSearch } from '@/modules/stores/$activeSearch'
+import { $fontFamily, fontFamilyStack } from '@/modules/stores/$fontFamily'
 import { $fontSize } from '@/modules/stores/$fontSize'
 
 export type XTermHandle = {
@@ -111,6 +113,7 @@ export const XTermTerminal = React.memo(function XTermTerminal({
   const searchAddonRef = useRef<SearchAddon | null>(null)
   const webglLifecycleRef = useRef<WebglLifecycle | null>(null)
   const fontSize = useStore($fontSize)
+  const fontFamily = useStore($fontFamily)
 
   // Keep callbacks + flags in refs so the mount-once effect always sees
   // the latest versions without needing to re-run when they change
@@ -145,7 +148,7 @@ export const XTermTerminal = React.memo(function XTermTerminal({
         document.documentElement.getAttribute('data-theme'),
         darkMq.matches,
       ),
-      fontFamily: '"Geist Mono", "Cascadia Code", "Fira Code", monospace',
+      fontFamily: fontFamilyStack($fontFamily.get()),
       fontSize: $fontSize.get(),
       lineHeight: 1.2,
       cursorBlink: true,
@@ -312,21 +315,14 @@ export const XTermTerminal = React.memo(function XTermTerminal({
     }
   }, [isActive])
 
-  // React to font-size changes globally. Defer fit() so the canvas
-  // re-rasterizes glyphs at the new size before recomputing cols/rows;
-  // refresh after fit because the old-size glyphs still occupy atlas
-  // slots that the visible buffer's cells point at — refresh re-resolves
-  // them at the new size.
-  useEffect(() => {
-    const term = termRef.current
-    const fit = fitAddonRef.current
-    if (!term || !fit) return
-    term.options.fontSize = fontSize
-    requestAnimationFrame(() => {
-      fit.fit()
-      if (term.rows > 0) term.refresh(0, term.rows - 1)
-    })
-  }, [fontSize])
+  // React to font-size / font-family changes globally — see
+  // `useLiveTerminalFont` for the re-rasterize rationale.
+  useLiveTerminalFont(
+    termRef.current,
+    fitAddonRef.current,
+    fontSize,
+    fontFamily,
+  )
 
   return (
     <div ref={containerRef} className={className ?? 'h-full min-h-0 w-full'} />
