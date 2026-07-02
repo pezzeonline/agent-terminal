@@ -122,3 +122,25 @@ export const Mod = {
 } as const
 
 export type ModName = (typeof Mod)[keyof typeof Mod]
+
+/**
+ * Produced-character tokens, for bindings that need `useKey: true` (match
+ * `KeyboardEvent.key`) instead of the `Keys` above (which match
+ * `KeyboardEvent.code`, i.e. physical position).
+ *
+ * Code-based matching assumes a US/ANSI layout for punctuation — `Cmd+=`
+ * only lives at `code: "Equal"` there. On many non-US layouts (e.g.
+ * Italian) '+' and '-' sit on entirely different physical keys, so a
+ * code-based binding silently never fires. Font-size zoom is a "the + key"
+ * concept, not a physical-position one, so it should match by character —
+ * same as how browsers bind their own Cmd+/Cmd- zoom.
+ *
+ * Requires react-hotkeys-hook >=5.3.3 (see package.json) — 5.3.2 and
+ * earlier match `useKey` combos *before* checking modifiers, so a lone
+ * '+' keypress with no Cmd held would also fire.
+ */
+export const ProducedChars = {
+  Equal: '=',
+  Plus: '+',
+  Minus: '-',
+} as const
