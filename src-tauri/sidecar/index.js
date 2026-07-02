@@ -51,16 +51,26 @@ function openTab({ tab_id, cols, rows }) {
   })
   const serializer = new SerializeAddon()
   term.loadAddon(serializer)
-  terminals.set(tab_id, { term, serializer })
+  // last_seq: highest seq the Rust hub has enqueued for this tab. Updated
+  // by writeBytes; returned by serializeTab so subscribe_remote can tag
+  // its snapshot with the exact seq whose bytes are reflected in the
+  // payload. `null` is the "no writes seen yet" sentinel — distinct from
+  // 0, which is a legitimate first-broadcast seq. The Rust side reads
+  // this as `Option<u64>` and initialises new subscribers accordingly.
+  terminals.set(tab_id, { term, serializer, last_seq: null })
 }
 
-function writeBytes({ tab_id, bytes_b64 }) {
+function writeBytes({ tab_id, bytes_b64, seq }) {
   const entry = terminals.get(tab_id)
   if (!entry) return
   // term.write is async-internal — the data joins a parser queue and the
   // visible buffer updates later. Fire-and-forget at this layer is fine
   // because `serialize` flushes the queue before reading.
   entry.term.write(Buffer.from(bytes_b64, 'base64'))
+  // Track the seq the Rust hub assigned to this chunk so a subsequent
+  // serialize can return it verbatim. Writes without a seq (historic
+  // callers, tests) leave the counter untouched.
+  if (typeof seq === 'number') entry.last_seq = seq
 }
 
 function resizeTab({ tab_id, cols, rows }) {
@@ -82,7 +92,13 @@ async function serializeTab({ tab_id, scrollback }) {
   const payload = entry.serializer.serialize({
     scrollback: typeof scrollback === 'number' ? scrollback : 1000,
   })
-  return { ok: true, payload }
+  // last_seq is the highest seq whose bytes have been fully parsed into the
+  // terminal buffer (flushWrites above waits for the parser to drain, so
+  // every write recorded before flush-callback has been applied). The Rust
+  // hub uses this exact value to tag ServerFrame::Snapshot.seq, eliminating
+  // the drift-window race between "which write did the payload include" and
+  // "which seq will the next Bytes broadcast target".
+  return { ok: true, payload, last_seq: entry.last_seq }
 }
 
 function closeTab({ tab_id }) {

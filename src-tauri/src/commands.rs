@@ -1,4 +1,5 @@
 use crate::mod_engine::ModEngine;
+use crate::project_registry::ProjectRegistry;
 use crate::pty_manager::{spawn_pty, try_reattach, PtyDataPayload, PtyMap, ReattachResult};
 use crate::stream_hub::StreamHub;
 use portable_pty::PtySize;
@@ -17,6 +18,7 @@ pub async fn open_tab(
     pty_map: State<'_, PtyMap>,
     mod_engine: State<'_, ModEngine>,
     hub: State<'_, Arc<StreamHub>>,
+    registry: State<'_, Arc<ProjectRegistry>>,
     tab_id: String,
     cwd: Option<String>,
     shell: Option<String>,
@@ -67,11 +69,15 @@ pub async fn open_tab(
         mod_engine.handle(),
         mod_engine.cwd_table(),
         Arc::clone(&hub),
+        Some(Arc::clone(&registry)),
         tab_id,
         cwd,
         shell,
         on_data,
     )?;
+    // Notify any WSS subscribers that the tab inventory changed so
+    // they push a fresh Projects frame to their mobile clients.
+    registry.notify_change();
     Ok(true)
 }
 
@@ -126,6 +132,7 @@ pub async fn resize_pty(
 pub async fn close_tab(
     pty_map: State<'_, PtyMap>,
     hub: State<'_, Arc<StreamHub>>,
+    registry: State<'_, Arc<ProjectRegistry>>,
     tab_id: String,
 ) -> Result<(), String> {
     // The reader thread reads `closing` on EOF to decide between emitting
@@ -146,6 +153,8 @@ pub async fn close_tab(
     // Done after the PtyMap mutation so the reader thread's `closing`
     // check sees the same ordering it always did. Fire-and-forget.
     hub.close_tab(&tab_id);
+    // Notify WSS subscribers so mobile clients see the tab disappear.
+    registry.notify_change();
     Ok(())
 }
 

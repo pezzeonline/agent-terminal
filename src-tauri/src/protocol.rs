@@ -197,7 +197,7 @@ pub struct TabStateSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::json;
 
     /// Every ClientFrame variant round-trips through JSON unchanged.
     /// Catches derive-macro mistakes (forgotten Serialize/Deserialize,

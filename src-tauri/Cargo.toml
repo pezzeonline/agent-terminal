@@ -51,7 +51,11 @@ portable-pty = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-axum = "0.8"
+# `ws` feature is needed for the WSS server's `/stream` endpoint. axum-ws
+# is a thin wrapper over tokio-tungstenite (which axum-ws pulls in for us)
+# — same underlying implementation the master plan sketched, with axum's
+# routing / middleware / graceful-shutdown machinery bolted on top.
+axum = { version = "0.8", features = ["ws"] }
 dirs = "5"
 encoding_rs = "0.8"
 sysinfo = "0.33"
@@ -74,4 +78,21 @@ dashmap = "6"
 # picks up every `#[typeshare]`-annotated type and emits the matching TS
 # discriminated-union file under `companion/src/modules/wss/protocol.gen.ts`.
 typeshare = "1"
+# Constant-time token comparison for the WSS auth stub. Prevents timing
+# attacks even in dev mode — cheap defence-in-depth over `==` on bytes.
+constant_time_eq = "0.3"
+# Random token generation for the initial dev config file. v4 UUIDs give
+# ~122 bits of entropy which is plenty for a Phase-1 bearer token.
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+# Isolated temp directories for auth_stub round-trip tests.
+tempfile = "3"
+# WebSocket client for the wss_server integration tests. Version pinned
+# to match what axum 0.8's `ws` feature pulls in transitively — avoids
+# two tungstenite stacks in the build.
+tokio-tungstenite = "0.26"
+# Stream/Sink extension traits needed for tokio-tungstenite's split
+# WebSocket handles.
+futures-util = "0.3"
 

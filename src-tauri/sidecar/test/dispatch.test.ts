@@ -95,6 +95,42 @@ describe('dispatch — happy path', () => {
     expect(r.ok).toBe(true)
     expect(typeof r.payload).toBe('string')
     expect(r.payload as string).toContain('hello world')
+    // last_seq is null when writeBytes was called without a seq (this
+    // test's write above does not pass one). The Rust side reads this
+    // as Option::None which subscribe_remote treats as "no writes seen
+    // yet." See the dedicated seq-threading test below for Some(N).
+    expect(r.last_seq).toBeNull()
+  })
+
+  test('serialize returns last_seq threaded through writeBytes', async () => {
+    await sidecar.dispatch({
+      id: 1,
+      verb: 'open',
+      args: { tab_id: 't1', cols: 80, rows: 24 },
+    })
+    // Three writes with increasing seqs. Sidecar tracks the highest
+    // seq per tab; serialize echoes it back.
+    await sidecar.dispatch({
+      verb: 'write',
+      args: { tab_id: 't1', bytes_b64: b64('one\r\n'), seq: 100 },
+    })
+    await sidecar.dispatch({
+      verb: 'write',
+      args: { tab_id: 't1', bytes_b64: b64('two\r\n'), seq: 101 },
+    })
+    await sidecar.dispatch({
+      verb: 'write',
+      args: { tab_id: 't1', bytes_b64: b64('three\r\n'), seq: 102 },
+    })
+    captured.length = 0
+    await sidecar.dispatch({
+      id: 5,
+      verb: 'serialize',
+      args: { tab_id: 't1', scrollback: 100 },
+    })
+    const r = lastReply()
+    expect(r.ok).toBe(true)
+    expect(r.last_seq).toBe(102)
   })
 
   test('resize replies ok and is reflected on subsequent serialize', async () => {
