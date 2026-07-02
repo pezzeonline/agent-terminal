@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { useEffect, useState } from 'react'
 import { useHotkeys } from 'react-hotkeys-hook'
+import { SettingsDialog } from '@/components/SettingsDialog/SettingsDialog'
 import { Sidebar } from '@/components/Sidebar/Sidebar'
 import { StatusBar } from '@/components/StatusBar/StatusBar'
 import { TabSwitcher } from '@/components/TabSwitcher/TabSwitcher'
@@ -9,6 +10,7 @@ import { TerminalSearchBar } from '@/components/TerminalSearchBar/TerminalSearch
 import { UpdateBanner } from '@/components/UpdateBanner/UpdateBanner'
 import { formatDropPayload } from '@/modules/dragDrop/dropPayload'
 import { Keys, Mod } from '@/modules/keymap/keys'
+import { useSettingsWiring } from '@/modules/settings/useSettingsWiring'
 import { $activeSearch, openSearch } from '@/modules/stores/$activeSearch'
 import { getActiveTerminalHandle } from '@/modules/stores/$activeTerminal'
 import { popClosedTab } from '@/modules/stores/$closedTabs'
@@ -87,6 +89,7 @@ export function WorkspaceLayout() {
   }, [])
 
   useUpdaterWiring()
+  useSettingsWiring()
 
   // enableOnFormTags is required because xterm uses a hidden <textarea> to
   // capture keyboard input. Without it react-hotkeys-hook silently ignores
@@ -291,6 +294,8 @@ export function WorkspaceLayout() {
       <UpdateBanner />
       {/* Self-contained: owns its open state + Cmd+P hotkey. */}
       <TabSwitcher />
+      {/* Self-contained: owns its open state via $settingsOpen. */}
+      <SettingsDialog />
     </div>
   )
 }
