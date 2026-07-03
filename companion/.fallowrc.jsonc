@@ -4,5 +4,14 @@
   // here for generated wire-protocol bindings that don't have a consumer
   // yet. The WSS client sub-step introduces the first import; when that
   // lands, this entry can go away.
-  "dynamicallyLoaded": ["src/modules/wss/protocol.gen.ts"]
+  "dynamicallyLoaded": ["src/modules/wss/protocol.gen.ts"],
+  "rules": {
+    // `expo` is the Expo SDK runtime. It's imported transitively by
+    // expo-router and directly by metro.config.js (build tooling). Fallow's
+    // static analysis classifies metro.config.js as non-production and
+    // doesn't follow the expo-router → expo edge, so it flags expo as
+    // "test-only". False positive for the whole Expo ecosystem — expo is
+    // the framework itself and cannot be moved to devDependencies.
+    "test-only-dependencies": "off"
+  }
 }
