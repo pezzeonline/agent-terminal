@@ -1,55 +1,52 @@
+import { zodResolver } from '@hookform/resolvers/zod'
 import { useStore } from '@nanostores/react'
 import { useState } from 'react'
+import { useForm } from 'react-hook-form'
 import { loadPairingConfig, savePairingConfig } from '@/modules/env/dev-config'
 import { $session } from '@/modules/stores/$session'
 import { connect } from '@/modules/wss/client'
-import { validateInputs } from './connect.helpers'
+import {
+  type ConnectInputs,
+  type ConnectOutputs,
+  connectSchema,
+} from './connect.schemas'
 
 export function useConnectData() {
   const session = useStore($session)
-  const [url, setUrl] = useState('')
-  const [token, setToken] = useState('')
+  const form = useForm<ConnectInputs, unknown, ConnectOutputs>({
+    resolver: zodResolver(connectSchema),
+    defaultValues: { url: '', token: '' },
+    mode: 'onSubmit',
+  })
   const [prefilled, setPrefilled] = useState(false)
-  const [validationError, setValidationError] = useState<string | null>(null)
 
   if (!prefilled) {
     setPrefilled(true)
     loadPairingConfig()
-      .then(({ url: u, token: t }) => {
-        if (u) setUrl(u)
-        if (t) setToken(t)
+      .then(({ url, token }) => {
+        form.reset({ url: url ?? '', token: token ?? '' })
       })
       .catch((err: unknown) => {
         console.error('[connect] loadPairingConfig failed:', err)
       })
   }
 
-  async function submit(): Promise<void> {
-    setValidationError(null)
-    const validated = validateInputs(url, token)
-    if (validated.kind === 'error') {
-      setValidationError(validated.message)
-      return
-    }
+  const onSubmit = form.handleSubmit(async (data) => {
     try {
-      await savePairingConfig(validated.url, validated.token)
+      await savePairingConfig(data.url, data.token)
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       console.error('[connect] savePairingConfig failed:', err)
-      setValidationError(`Failed to save credentials: ${msg}`)
+      form.setError('root', { message: `Failed to save credentials, ${msg}` })
       return
     }
-    connect(validated.url, validated.token)
-  }
+    connect(data.url, data.token)
+  })
 
   return {
-    url,
-    token,
-    setUrl,
-    setToken,
-    submit,
+    form,
+    onSubmit,
     status: session.status,
-    error: session.lastError,
-    validationError,
+    serverError: session.lastError,
   }
 }

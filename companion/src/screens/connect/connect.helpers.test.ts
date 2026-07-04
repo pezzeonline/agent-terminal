@@ -1,10 +1,6 @@
 import { describe, expect, test } from 'bun:test'
-import {
-  connectErrorMessage,
-  looksLikeUuid,
-  normaliseWssUrl,
-  validateInputs,
-} from './connect.helpers'
+import { connectErrorMessage, normaliseWssUrl } from './connect.helpers'
+import { connectSchema } from './connect.schemas'
 
 describe('normaliseWssUrl', () => {
   test('preserves ws:// and wss:// prefixes', () => {
@@ -28,61 +24,61 @@ describe('normaliseWssUrl', () => {
   })
 })
 
-describe('looksLikeUuid', () => {
-  test('accepts a canonical UUID', () => {
-    expect(looksLikeUuid('99be5462-d34a-49d6-9754-8c4ed9f2456f')).toBe(true)
+describe('connectSchema', () => {
+  test('rejects empty URL with a specific message', () => {
+    const result = connectSchema.safeParse({ url: '', token: 'x' })
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.issues[0]?.message).toBe('WSS URL is required')
+      expect(result.error.issues[0]?.path).toEqual(['url'])
+    }
   })
 
-  test('rejects non-hex garbage', () => {
-    expect(looksLikeUuid('hello world')).toBe(false)
-    expect(looksLikeUuid('short')).toBe(false)
+  test('rejects whitespace-only token', () => {
+    const result = connectSchema.safeParse({ url: 'ws://x', token: '   ' })
+    expect(result.success).toBe(false)
+    if (!result.success) {
+      expect(result.error.issues[0]?.message).toBe('Token is required')
+      expect(result.error.issues[0]?.path).toEqual(['token'])
+    }
   })
-})
 
-describe('validateInputs', () => {
-  test('rejects empty URL', () => {
-    expect(validateInputs('', 'token').kind).toBe('error')
-  })
-  test('rejects empty token', () => {
-    expect(validateInputs('ws://x', '').kind).toBe('error')
-  })
-  test('trims and normalises on success', () => {
-    const result = validateInputs('192.168.1.1:47823', '  token  ')
-    expect(result).toEqual({
-      kind: 'ok',
-      url: 'ws://192.168.1.1:47823',
-      token: 'token',
+  test('normalises URL and trims token on success', () => {
+    const result = connectSchema.safeParse({
+      url: '192.168.1.1:47823',
+      token: '  99be5462-d34a-49d6-9754-8c4ed9f2456f  ',
     })
+    expect(result.success).toBe(true)
+    if (result.success) {
+      expect(result.data).toEqual({
+        url: 'ws://192.168.1.1:47823',
+        token: '99be5462-d34a-49d6-9754-8c4ed9f2456f',
+      })
+    }
   })
 })
 
 describe('connectErrorMessage', () => {
-  test('validation errors win over status errors', () => {
-    expect(
-      connectErrorMessage('auth_failed', 'bad token', 'URL required'),
-    ).toBe('URL required')
-  })
-
   test('auth_failed surfaces the server-provided reason', () => {
-    expect(connectErrorMessage('auth_failed', 'bad token', null)).toBe(
+    expect(connectErrorMessage('auth_failed', 'bad token')).toBe(
       'Auth failed, bad token',
     )
   })
 
   test('unreachable falls back to a generic message when no error', () => {
-    expect(connectErrorMessage('unreachable', null, null)).toBe(
+    expect(connectErrorMessage('unreachable', null)).toBe(
       'Server not reachable. Check the URL and your Wi-Fi.',
     )
   })
 
   test('unreachable includes the error reason when present', () => {
-    expect(connectErrorMessage('unreachable', 'timeout', null)).toBe(
+    expect(connectErrorMessage('unreachable', 'timeout')).toBe(
       'Server not reachable, timeout',
     )
   })
 
   test('returns null when nothing is wrong', () => {
-    expect(connectErrorMessage('connected', null, null)).toBe(null)
-    expect(connectErrorMessage('connecting', null, null)).toBe(null)
+    expect(connectErrorMessage('connected', null)).toBe(null)
+    expect(connectErrorMessage('connecting', null)).toBe(null)
   })
 })
