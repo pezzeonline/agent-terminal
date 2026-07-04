@@ -1,3 +1,4 @@
+import { Redirect } from 'expo-router'
 import { Controller, type Control, type FieldErrors } from 'react-hook-form'
 import { Pressable, Text, TextInput, View } from 'react-native'
 import { useConnectData } from './connect.data'
@@ -6,6 +7,9 @@ import type { ConnectInputs } from './connect.schemas'
 
 export function ConnectScreen() {
   const { form, onSubmit, status, serverError } = useConnectData()
+
+  if (status === 'connected') return <Redirect href="/" />
+
   const {
     control,
     formState: { errors, isSubmitting },
