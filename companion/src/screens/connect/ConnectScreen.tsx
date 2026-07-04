@@ -27,7 +27,6 @@ export function ConnectScreen() {
             placeholder="paste the UUID from companion-dev.json"
             autoCapitalize="none"
             autoCorrect={false}
-            secureTextEntry
             value={token}
             onChangeText={setToken}
           />
