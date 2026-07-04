@@ -29,6 +29,8 @@ const BACKOFF_MIN_MS = 1_000
 const BACKOFF_MAX_MS = 30_000
 
 export function connect(url: string, token: string): void {
+  console.log('[wss.client] connect()', { url, tokenLen: token.length })
+  clearTimers()
   state.url = url
   state.token = token
   state.intentionallyDisconnected = false
@@ -55,24 +57,47 @@ export function nextBackoffDelay(attempt: number): number {
 }
 
 function openSocket(): void {
-  if (!state.url || !state.token) return
+  if (!state.url || !state.token) {
+    console.warn('[wss.client] openSocket skipped, missing url or token')
+    return
+  }
   $session.setKey('status', 'connecting')
-  const ws = new WebSocket(state.url)
+  console.log('[wss.client] opening WebSocket to', state.url)
+  let ws: WebSocket
+  try {
+    ws = new WebSocket(state.url)
+  } catch (err) {
+    console.error('[wss.client] WebSocket constructor threw:', err)
+    $session.setKey('status', 'unreachable')
+    $session.setKey(
+      'lastError',
+      err instanceof Error ? err.message : String(err),
+    )
+    scheduleReconnect()
+    return
+  }
   state.socket = ws
   ws.onopen = () => {
+    console.log('[wss.client] socket open, sending auth')
     send({ op: 'auth', body: { token: state.token ?? '' } })
   }
   ws.onmessage = (event) => handleFrame(event.data as string)
-  ws.onclose = () => {
+  ws.onclose = (event) => {
+    console.log('[wss.client] socket closed', {
+      code: event.code,
+      reason: event.reason,
+    })
     clearTimers()
     state.socket = null
     if (state.intentionallyDisconnected) return
     if ($session.get().status !== 'auth_failed') {
       $session.setKey('status', 'unreachable')
+      if (event.reason) $session.setKey('lastError', event.reason)
     }
     scheduleReconnect()
   }
-  ws.onerror = () => {
+  ws.onerror = (event) => {
+    console.error('[wss.client] socket error event', event)
     // onerror is always followed by onclose in browsers and RN. Let
     // the close handler drive the reconnect + state transition so we
     // avoid double-scheduling.
@@ -83,9 +108,11 @@ function handleFrame(raw: string): void {
   let frame: ServerFrame
   try {
     frame = JSON.parse(raw) as ServerFrame
-  } catch {
+  } catch (err) {
+    console.error('[wss.client] failed to parse frame:', err, 'raw:', raw)
     return
   }
+  console.log('[wss.client] frame', frame.op)
   switch (frame.op) {
     case 'auth_ok':
       state.reconnectAttempts = 0
@@ -99,6 +126,7 @@ function handleFrame(raw: string): void {
       startHeartbeat()
       break
     case 'auth_fail':
+      console.warn('[wss.client] auth failed:', frame.body.reason)
       $session.setKey('status', 'auth_failed')
       $session.setKey('lastError', frame.body.reason)
       state.intentionallyDisconnected = true

@@ -1,9 +1,18 @@
 import { Pressable, Text, TextInput, View } from 'react-native'
 import { useConnectData } from './connect.data'
+import { connectErrorMessage } from './connect.helpers'
 
 export function ConnectScreen() {
-  const { url, token, setUrl, setToken, submit, status, error } =
-    useConnectData()
+  const {
+    url,
+    token,
+    setUrl,
+    setToken,
+    submit,
+    status,
+    error,
+    validationError,
+  } = useConnectData()
   const disabled = status === 'connecting'
 
   return (
@@ -31,7 +40,11 @@ export function ConnectScreen() {
             onChangeText={setToken}
           />
         </LabeledField>
-        <ConnectError status={status} error={error} />
+        <ConnectError
+          status={status}
+          error={error}
+          validationError={validationError}
+        />
         <Pressable
           onPress={submit}
           disabled={disabled}
@@ -79,21 +92,13 @@ function LabeledField({
 function ConnectError({
   status,
   error,
+  validationError,
 }: {
   status: string
   error: string | null
+  validationError: string | null
 }) {
-  if (status === 'auth_failed' && error) {
-    return (
-      <Text className="text-destructive text-sm">Auth failed, {error}</Text>
-    )
-  }
-  if (status === 'unreachable') {
-    return (
-      <Text className="text-destructive text-sm">
-        Server not reachable. Check the URL and your Wi-Fi.
-      </Text>
-    )
-  }
-  return null
+  const message = connectErrorMessage(status, error, validationError)
+  if (!message) return null
+  return <Text className="text-destructive text-sm">{message}</Text>
 }
