@@ -1,5 +1,11 @@
 # Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
 
+# Common global gitignores (Python virtualenv `ENV/`) case-insensitively
+# match src/modules/env/ on macOS. Un-ignore the source folder here so
+# our env config modules always get tracked.
+!src/modules/env/
+!src/modules/env/**
+
 # dependencies
 node_modules/
 
