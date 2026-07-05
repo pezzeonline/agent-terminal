@@ -1,26 +1,26 @@
 import { describe, expect, test } from 'bun:test'
-import { connectErrorMessage, normaliseWssUrl } from './connect.helpers'
+import { connectErrorMessage, normaliseWebSocketUrl } from './connect.helpers'
 import { connectSchema } from './connect.schemas'
 
-describe('normaliseWssUrl', () => {
+describe('normaliseWebSocketUrl', () => {
   test('preserves ws:// and wss:// prefixes', () => {
-    expect(normaliseWssUrl('ws://192.168.1.42:47823/stream')).toBe(
+    expect(normaliseWebSocketUrl('ws://192.168.1.42:47823/stream')).toBe(
       'ws://192.168.1.42:47823/stream',
     )
-    expect(normaliseWssUrl('wss://example.com/stream')).toBe(
+    expect(normaliseWebSocketUrl('wss://example.com/stream')).toBe(
       'wss://example.com/stream',
     )
   })
 
   test('prepends ws:// to a bare host:port', () => {
-    expect(normaliseWssUrl('192.168.1.42:47823')).toBe(
+    expect(normaliseWebSocketUrl('192.168.1.42:47823')).toBe(
       'ws://192.168.1.42:47823',
     )
   })
 
   test('returns empty for empty input', () => {
-    expect(normaliseWssUrl('   ')).toBe('')
-    expect(normaliseWssUrl('')).toBe('')
+    expect(normaliseWebSocketUrl('   ')).toBe('')
+    expect(normaliseWebSocketUrl('')).toBe('')
   })
 })
 

@@ -1,6 +1,6 @@
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useStore } from '@nanostores/react'
-import { useState } from 'react'
+import { useEffect } from 'react'
 import { useForm } from 'react-hook-form'
 import { loadPairingConfig, savePairingConfig } from '@/modules/env/dev-config'
 import { $session } from '@/modules/stores/$session'
@@ -18,18 +18,27 @@ export function useConnectData() {
     defaultValues: { url: '', token: '' },
     mode: 'onSubmit',
   })
-  const [prefilled, setPrefilled] = useState(false)
 
-  if (!prefilled) {
-    setPrefilled(true)
+  // Async prefill from persisted config on mount. `cancelled` guard
+  // handles the unmount-during-load race so we don't call form.reset
+  // on a stale form. useEffect over the render-time gate-flag idiom
+  // because the resolution happens asynchronously — CLAUDE.md's
+  // useEffect exception for "syncing to a store outside React" fits.
+  useEffect(() => {
+    let cancelled = false
     loadPairingConfig()
       .then(({ url, token }) => {
+        if (cancelled) return
         form.reset({ url: url ?? '', token: token ?? '' })
       })
       .catch((err: unknown) => {
+        if (cancelled) return
         console.error('[connect] loadPairingConfig failed:', err)
       })
-  }
+    return () => {
+      cancelled = true
+    }
+  }, [form])
 
   const onSubmit = form.handleSubmit(async (data) => {
     try {

@@ -1,4 +1,4 @@
-export function normaliseWssUrl(input: string): string {
+export function normaliseWebSocketUrl(input: string): string {
   const trimmed = input.trim()
   if (!trimmed) return ''
   if (trimmed.startsWith('ws://') || trimmed.startsWith('wss://')) {

@@ -1,11 +1,11 @@
 import { z } from 'zod'
-import { normaliseWssUrl } from './connect.helpers'
+import { normaliseWebSocketUrl } from './connect.helpers'
 
 export const connectSchema = z.object({
   url: z
     .string()
     .min(1, 'WSS URL is required')
-    .transform((raw) => normaliseWssUrl(raw))
+    .transform((raw) => normaliseWebSocketUrl(raw))
     .refine((v) => v.length > 0, 'WSS URL is required'),
   token: z
     .string()

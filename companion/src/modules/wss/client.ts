@@ -4,6 +4,7 @@ import { computeBackoffDelay } from './client.helpers'
 
 type ConnectionState = {
   socket: WebSocket | null
+  socketGeneration: number
   url: string | null
   token: string | null
   reconnectAttempts: number
@@ -15,6 +16,7 @@ type ConnectionState = {
 
 const state: ConnectionState = {
   socket: null,
+  socketGeneration: 0,
   url: null,
   token: null,
   reconnectAttempts: 0,
@@ -59,13 +61,29 @@ function openSocket(): void {
   console.log('[wss.client] opening WebSocket to', state.url)
   const ws = tryConstructSocket(state.url)
   if (!ws) return
+  state.socketGeneration += 1
+  const generation = state.socketGeneration
   state.socket = ws
-  ws.onopen = handleOpen
-  ws.onmessage = (event) => handleFrame(event.data as string)
-  ws.onclose = handleClose
+  ws.onopen = () => {
+    if (!isCurrentGeneration(generation)) return
+    handleOpen()
+  }
+  ws.onmessage = (event) => {
+    if (!isCurrentGeneration(generation)) return
+    handleFrame(event.data as string)
+  }
+  ws.onclose = (event) => {
+    if (!isCurrentGeneration(generation)) return
+    handleClose(event)
+  }
   ws.onerror = (event) => {
+    if (!isCurrentGeneration(generation)) return
     console.error('[wss.client] socket error event', event)
   }
+}
+
+function isCurrentGeneration(generation: number): boolean {
+  return generation === state.socketGeneration
 }
 
 function tryConstructSocket(url: string): WebSocket | null {

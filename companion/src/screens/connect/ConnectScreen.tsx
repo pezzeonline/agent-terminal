@@ -1,4 +1,5 @@
 import { Redirect } from 'expo-router'
+import type { ReactNode } from 'react'
 import { Controller, type Control, type FieldErrors } from 'react-hook-form'
 import { Pressable, Text, TextInput, View } from 'react-native'
 import { useConnectData } from './connect.data'
@@ -50,7 +51,7 @@ function LabeledField({
 }: {
   label: string
   error: string | undefined
-  children: React.ReactNode
+  children: ReactNode
 }) {
   return (
     <View className="gap-2">
