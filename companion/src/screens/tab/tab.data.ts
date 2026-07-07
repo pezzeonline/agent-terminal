@@ -1,6 +1,6 @@
 import { useStore } from '@nanostores/react'
 import { decode } from 'js-base64'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { $session } from '@/modules/stores/$session'
 import {
   resizeTab as resizeTabWss,
@@ -37,17 +37,23 @@ export function useTabData(tabId: string) {
     }
   }, [tabId, ready])
 
-  const onReady = async () => {
+  const onReady = useCallback(async () => {
     setReady(true)
-  }
+  }, [])
 
-  const onData = async (data: string) => {
-    writeToTab(tabId, data)
-  }
+  const onData = useCallback(
+    async (data: string) => {
+      writeToTab(tabId, data)
+    },
+    [tabId],
+  )
 
-  const onResize = async (cols: number, rows: number) => {
-    resizeTabWss(tabId, cols, rows)
-  }
+  const onResize = useCallback(
+    async (cols: number, rows: number) => {
+      resizeTabWss(tabId, cols, rows)
+    },
+    [tabId],
+  )
 
   return {
     terminalRef,
