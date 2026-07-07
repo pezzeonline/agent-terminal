@@ -1,13 +1,25 @@
 import { useEffect, useRef } from 'react'
 import { Animated, Keyboard, Text, View } from 'react-native'
+import { ExtraKeysBar } from './ExtraKeysBar'
 import TerminalDom from './TerminalDom'
 import { useTabData } from './tab.data'
 
-const DOM_PROPS = { scrollEnabled: false }
+const DOM_PROPS = { scrollEnabled: false, hideKeyboardAccessoryView: true }
 
 export function TabScreen({ tabId }: { tabId: string }) {
-  const { terminalRef, onData, onResize, onReady, status, deviceName } =
-    useTabData(tabId)
+  const {
+    terminalRef,
+    onData,
+    onResize,
+    onReady,
+    onKey,
+    ctrlArmed,
+    altArmed,
+    toggleCtrl,
+    toggleAlt,
+    status,
+    deviceName,
+  } = useTabData(tabId)
   const spacerHeight = useRef(new Animated.Value(0)).current
 
   useEffect(() => {
@@ -50,6 +62,13 @@ export function TabScreen({ tabId }: { tabId: string }) {
           dom={DOM_PROPS}
         />
       </View>
+      <ExtraKeysBar
+        ctrlArmed={ctrlArmed}
+        altArmed={altArmed}
+        onKey={onKey}
+        onToggleCtrl={toggleCtrl}
+        onToggleAlt={toggleAlt}
+      />
       <Animated.View style={{ height: spacerHeight }} />
     </View>
   )
