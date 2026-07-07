@@ -1,15 +1,19 @@
 import { KeyboardAvoidingView, Platform, Text, View } from 'react-native'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import TerminalDom from './TerminalDom'
 import { useTabData } from './tab.data'
 
 export function TabScreen({ tabId }: { tabId: string }) {
   const { terminalRef, onData, onResize, onReady, status, deviceName } =
     useTabData(tabId)
+  const insets = useSafeAreaInsets()
 
   return (
     <KeyboardAvoidingView
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={0}
       className="flex-1 bg-background"
+      style={{ paddingTop: insets.top }}
     >
       <View className="border-border border-b bg-muted px-4 py-2">
         <Text className="text-muted-foreground text-xs">

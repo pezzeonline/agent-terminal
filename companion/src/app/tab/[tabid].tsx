@@ -1,5 +1,5 @@
 import { useStore } from '@nanostores/react'
-import { Redirect, useLocalSearchParams } from 'expo-router'
+import { Redirect, Stack, useLocalSearchParams } from 'expo-router'
 import { $session } from '@/modules/stores/$session'
 import { TabScreen } from '@/screens/tab/TabScreen'
 
@@ -9,5 +9,10 @@ export default function TabRoute() {
   if (session.status !== 'connected') {
     return <Redirect href="/connect" />
   }
-  return <TabScreen tabId={tabid} />
+  return (
+    <>
+      <Stack.Screen options={{ headerShown: false }} />
+      <TabScreen tabId={tabid} />
+    </>
+  )
 }
