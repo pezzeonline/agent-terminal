@@ -1,6 +1,6 @@
 import { Redirect } from 'expo-router'
 import type { ReactNode } from 'react'
-import { Controller, type Control, type FieldErrors } from 'react-hook-form'
+import { type Control, Controller, type FieldErrors } from 'react-hook-form'
 import { Pressable, Text, TextInput, View } from 'react-native'
 import { useConnectData } from './connect.data'
 import { connectErrorMessage } from './connect.helpers'

@@ -1,6 +1,24 @@
 import { $session, resetSession } from '@/modules/stores/$session'
-import type { ClientFrame, ServerFrame } from '@/modules/wss/protocol.gen'
+import type {
+  ClientFrame,
+  ServerFrame,
+  TabStateSummary,
+} from '@/modules/wss/protocol.gen'
 import { computeBackoffDelay } from './client.helpers'
+
+export type TabHandlers = {
+  onSnapshot: (payload: string, seq: number) => void
+  onBytes: (b64: string, seq: number) => void
+  onResized?: (cols: number, rows: number) => void
+  onTabState?: (state: TabStateSummary) => void
+}
+
+type TabSubscription = TabHandlers & {
+  scrollback: number
+  lastSeq: number | null
+}
+
+const subscriptions = new Map<string, TabSubscription>()
 
 type ConnectionState = {
   socket: WebSocket | null
@@ -44,7 +62,61 @@ export function disconnect(): void {
   clearTimers()
   state.socket?.close()
   state.socket = null
+  subscriptions.clear()
   resetSession()
+}
+
+export function subscribeToTab(
+  tabId: string,
+  scrollback: number,
+  handlers: TabHandlers,
+): void {
+  const prior = subscriptions.get(tabId)
+  const sub: TabSubscription = {
+    ...handlers,
+    scrollback,
+    lastSeq: prior?.lastSeq ?? null,
+  }
+  subscriptions.set(tabId, sub)
+  if ($session.get().status === 'connected') {
+    sendSubscribeOrResume(tabId, sub)
+  }
+}
+
+export function unsubscribeFromTab(tabId: string): void {
+  const had = subscriptions.delete(tabId)
+  if (!had) return
+  if ($session.get().status === 'connected') {
+    send({ op: 'unsubscribe', body: { tab_id: tabId } })
+  }
+}
+
+export function writeToTab(tabId: string, data: string): void {
+  send({ op: 'write', body: { tab_id: tabId, data } })
+}
+
+export function resizeTab(tabId: string, cols: number, rows: number): void {
+  send({ op: 'resize', body: { tab_id: tabId, cols, rows } })
+}
+
+function sendSubscribeOrResume(tabId: string, sub: TabSubscription): void {
+  if (sub.lastSeq !== null) {
+    console.log('[wss.client] resume', { tabId, lastSeq: sub.lastSeq })
+    send({
+      op: 'resume',
+      body: {
+        tab_id: tabId,
+        scrollback: sub.scrollback,
+        last_seq: sub.lastSeq,
+      },
+    })
+    return
+  }
+  console.log('[wss.client] subscribe', { tabId })
+  send({
+    op: 'subscribe',
+    body: { tab_id: tabId, scrollback: sub.scrollback },
+  })
 }
 
 function send(frame: ClientFrame): void {
@@ -147,9 +219,41 @@ function dispatchFrame(frame: ServerFrame): void {
     $session.setKey('projects', frame.body.data)
     return
   }
+  if (frame.op === 'snapshot') {
+    dispatchSnapshot(frame.body.tab_id, frame.body.seq, frame.body.payload)
+    return
+  }
+  if (frame.op === 'bytes') {
+    dispatchBytes(frame.body.tab_id, frame.body.seq, frame.body.data)
+    return
+  }
+  if (frame.op === 'resized') {
+    subscriptions
+      .get(frame.body.tab_id)
+      ?.onResized?.(frame.body.cols, frame.body.rows)
+    return
+  }
+  if (frame.op === 'tab_state') {
+    subscriptions.get(frame.body.tab_id)?.onTabState?.(frame.body.state)
+    return
+  }
   if (frame.op === 'pong') {
     state.pongDeadline = null
   }
+}
+
+function dispatchSnapshot(tabId: string, seq: number, payload: string): void {
+  const sub = subscriptions.get(tabId)
+  if (!sub) return
+  sub.lastSeq = seq
+  sub.onSnapshot(payload, seq)
+}
+
+function dispatchBytes(tabId: string, seq: number, b64: string): void {
+  const sub = subscriptions.get(tabId)
+  if (!sub) return
+  sub.lastSeq = seq
+  sub.onBytes(b64, seq)
 }
 
 function handleAuthOk(deviceName: string): void {
@@ -162,6 +266,13 @@ function handleAuthOk(deviceName: string): void {
     lastConnectedAt: Date.now(),
   })
   startHeartbeat()
+  replayOpenSubscriptions()
+}
+
+function replayOpenSubscriptions(): void {
+  for (const [tabId, sub] of subscriptions) {
+    sendSubscribeOrResume(tabId, sub)
+  }
 }
 
 function handleAuthFail(reason: string): void {
