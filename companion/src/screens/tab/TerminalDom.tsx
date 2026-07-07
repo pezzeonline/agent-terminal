@@ -34,6 +34,17 @@ export default function TerminalDom({
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
 
+  // Live refs to the latest callbacks. The useEffect below reads these
+  // during xterm.js events without needing the props themselves in its
+  // deps array. Keeps the effect (and the WebView-backed Terminal) mounted
+  // across parent state changes, e.g. modifier arm/disarm in TabScreen.
+  const onDataRef = useRef(onData)
+  const onResizeRef = useRef(onResize)
+  const onReadyRef = useRef(onReady)
+  onDataRef.current = onData
+  onResizeRef.current = onResize
+  onReadyRef.current = onReady
+
   useDOMImperativeHandle(ref, () => ({
     write: (...args: Args) => {
       const data = args[0]
@@ -75,10 +86,10 @@ export default function TerminalDom({
     // sidecar renders the snapshot at whatever dimensions the tab was
     // created with, and the initial hydration looks wrong on mobile.
     const dataDisposable = term.onData((data) => {
-      void onData(data)
+      void onDataRef.current(data)
     })
     const resizeDisposable = term.onResize(({ cols, rows }) => {
-      void onResize(cols, rows)
+      void onResizeRef.current(cols, rows)
     })
 
     fit.fit()
@@ -86,7 +97,7 @@ export default function TerminalDom({
     const observer = new ResizeObserver(() => fit.fit())
     observer.observe(containerRef.current)
 
-    void onReady()
+    void onReadyRef.current()
 
     return () => {
       observer.disconnect()
@@ -96,7 +107,7 @@ export default function TerminalDom({
       termRef.current = null
       fitRef.current = null
     }
-  }, [onData, onResize, onReady])
+  }, [])
 
   return (
     <div
