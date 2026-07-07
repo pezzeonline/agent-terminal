@@ -26,7 +26,23 @@ export const DEFAULT_TERMINAL_HTML_CONFIG: TerminalHtmlConfig = {
   themeCursor: '#e6e8eb',
 }
 
+// Whitelist-based CSS color validator. Accepts hex, rgb/rgba, oklch, and
+// bare-letter named colors. Anything else falls back to a safe default,
+// preventing style-tag breakout via strings like `red; } </style>`. The
+// JS side already uses JSON.stringify for the same reason; this brings
+// CSS to parity.
+const SAFE_CSS_FALLBACK = '#000000'
+
+export function safeCssColor(input: string): string {
+  if (/^#[0-9a-f]{3,8}$/i.test(input)) return input
+  if (/^rgba?\([\d\s,.%]+\)$/i.test(input)) return input
+  if (/^oklch\([\d\s,./%]+\)$/i.test(input)) return input
+  if (/^[a-z]+$/i.test(input)) return input
+  return SAFE_CSS_FALLBACK
+}
+
 export function buildTerminalHtml(config: TerminalHtmlConfig): string {
+  const cssBackground = safeCssColor(config.themeBackground)
   return `<!doctype html>
 <html>
 <head>
@@ -34,7 +50,7 @@ export function buildTerminalHtml(config: TerminalHtmlConfig): string {
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@${config.xtermVersion}/css/xterm.css">
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; width: 100%; background: ${config.themeBackground}; overflow: hidden; }
+  html, body { margin: 0; padding: 0; height: 100%; width: 100%; background: ${cssBackground}; overflow: hidden; }
   #terminal { position: absolute; inset: 0; }
 </style>
 </head>
@@ -51,8 +67,20 @@ export function buildTerminalHtml(config: TerminalHtmlConfig): string {
     }
   }
 
+  // Max ~10 s (200 * 50 ms) waiting for the unpkg UMDs to register on
+  // window. If the tab is offline, on a captive-portal wifi, or unpkg is
+  // down, stop retrying and post an error so RN can log + optionally
+  // surface it. Prevents an infinite battery-draining loop.
+  var bootAttempts = 0;
+  var BOOT_MAX_ATTEMPTS = 200;
+
   function boot() {
     if (!window.Terminal || !window.FitAddon || !window.WebLinksAddon) {
+      bootAttempts += 1;
+      if (bootAttempts >= BOOT_MAX_ATTEMPTS) {
+        post({ type: 'error', message: 'Failed to load xterm.js from unpkg (timeout)' });
+        return;
+      }
       setTimeout(boot, 50);
       return;
     }

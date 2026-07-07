@@ -32,6 +32,7 @@ type BridgeMessage =
   | { type: 'ready' }
   | { type: 'data'; payload: string }
   | { type: 'resize'; cols: number; rows: number }
+  | { type: 'error'; message: string }
 
 export default function TerminalDom({
   onData,
@@ -109,6 +110,10 @@ export default function TerminalDom({
     }
     if (msg.type === 'resize') {
       void onResizeRef.current(msg.cols, msg.rows)
+      return
+    }
+    if (msg.type === 'error') {
+      console.error('[TerminalDom.android] boot error:', msg.message)
     }
   }
 
