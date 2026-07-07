@@ -4,7 +4,14 @@
   // here for generated wire-protocol bindings that don't have a consumer
   // yet. The WSS client sub-step introduces the first import; when that
   // lands, this entry can go away.
-  "dynamicallyLoaded": ["src/modules/wss/protocol.gen.ts"],
+  "dynamicallyLoaded": [
+    "src/modules/wss/protocol.gen.ts",
+    // Metro's platform resolution picks TerminalDom.android.tsx on Android
+    // and TerminalDom.tsx on iOS/fallback. Fallow's import graph doesn't
+    // model the platform split, so it flags the iOS file as unreachable.
+    // Both are legitimate consumers.
+    "src/screens/tab/TerminalDom.tsx"
+  ],
   // react-native-web is required by expo/dom's `.web.tsx` files that
   // Metro pulls in when bundling `'use dom'` components. No source
   // file directly imports it; the bundler wires it transparently.
