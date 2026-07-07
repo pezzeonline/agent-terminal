@@ -11,7 +11,7 @@ export default function TabRoute() {
   }
   return (
     <>
-      <Stack.Screen options={{ headerShown: false }} />
+      <Stack.Screen options={{ title: 'Terminal' }} />
       <TabScreen tabId={tabid} />
     </>
   )
