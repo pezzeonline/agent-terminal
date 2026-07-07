@@ -66,16 +66,22 @@ export default function TerminalDom({
     term.loadAddon(fit)
     term.loadAddon(new WebLinksAddon())
     term.open(containerRef.current)
-    fit.fit()
     termRef.current = term
     fitRef.current = fit
 
+    // Register listeners BEFORE the initial fit() so the resize event
+    // it triggers (from the constructed 80x24 default to the container's
+    // actual cols/rows) reaches the native side. Otherwise the desktop's
+    // sidecar renders the snapshot at whatever dimensions the tab was
+    // created with, and the initial hydration looks wrong on mobile.
     const dataDisposable = term.onData((data) => {
       void onData(data)
     })
     const resizeDisposable = term.onResize(({ cols, rows }) => {
       void onResize(cols, rows)
     })
+
+    fit.fit()
 
     const observer = new ResizeObserver(() => fit.fit())
     observer.observe(containerRef.current)
