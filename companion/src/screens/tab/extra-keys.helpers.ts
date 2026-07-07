@@ -13,8 +13,13 @@ export const SEQ = {
   arrowRight: '\x1b[C',
 } as const
 
+// Ctrl only maps to a control code when combined with a letter (Ctrl+A → 0x01,
+// Ctrl+Z → 0x1a). Punctuation, digits, and multi-char sequences are passed
+// through unchanged rather than mangled through the `& 0x1f` bitmask (e.g.
+// Ctrl+/ would otherwise emit \x0f, Ctrl+- would emit \r).
 export function applyCtrl(input: string): string {
   if (input.length !== 1) return input
+  if (!/^[a-zA-Z]$/.test(input)) return input
   const code = input.charCodeAt(0)
   return String.fromCharCode(code & 0x1f)
 }

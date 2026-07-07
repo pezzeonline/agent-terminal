@@ -43,6 +43,14 @@ describe('applyCtrl', () => {
     expect(applyCtrl('ab')).toBe('ab')
     expect(applyCtrl(SEQ.arrowUp)).toBe(SEQ.arrowUp)
   })
+
+  test('single-char non-letters pass through unchanged', () => {
+    expect(applyCtrl('/')).toBe('/')
+    expect(applyCtrl('-')).toBe('-')
+    expect(applyCtrl('1')).toBe('1')
+    expect(applyCtrl('[')).toBe('[')
+    expect(applyCtrl(SEQ.tab)).toBe(SEQ.tab)
+  })
 })
 
 describe('applyAlt', () => {
