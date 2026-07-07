@@ -19,6 +19,7 @@ export interface TerminalHandle extends DOMImperativeFactory {
 interface TerminalDomProps {
   onData: (data: string) => Promise<void>
   onResize: (cols: number, rows: number) => Promise<void>
+  onReady: () => Promise<void>
   ref: Ref<TerminalHandle>
   dom?: DOMProps
 }
@@ -26,6 +27,7 @@ interface TerminalDomProps {
 export default function TerminalDom({
   onData,
   onResize,
+  onReady,
   ref,
 }: TerminalDomProps) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -78,6 +80,8 @@ export default function TerminalDom({
     const observer = new ResizeObserver(() => fit.fit())
     observer.observe(containerRef.current)
 
+    void onReady()
+
     return () => {
       observer.disconnect()
       dataDisposable.dispose()
@@ -86,7 +90,7 @@ export default function TerminalDom({
       termRef.current = null
       fitRef.current = null
     }
-  }, [onData, onResize])
+  }, [onData, onResize, onReady])
 
   return (
     <div

@@ -3,7 +3,7 @@ import TerminalDom from './TerminalDom'
 import { useTabData } from './tab.data'
 
 export function TabScreen({ tabId }: { tabId: string }) {
-  const { terminalRef, onData, onResize, status, deviceName } =
+  const { terminalRef, onData, onResize, onReady, status, deviceName } =
     useTabData(tabId)
 
   return (
@@ -21,6 +21,7 @@ export function TabScreen({ tabId }: { tabId: string }) {
           ref={terminalRef}
           onData={onData}
           onResize={onResize}
+          onReady={onReady}
           dom={{ scrollEnabled: false }}
         />
       </View>

@@ -1,6 +1,6 @@
 import { useStore } from '@nanostores/react'
 import { decode } from 'js-base64'
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { $session } from '@/modules/stores/$session'
 import {
   resizeTab as resizeTabWss,
@@ -15,21 +15,31 @@ const SCROLLBACK = 2000
 export function useTabData(tabId: string) {
   const session = useStore($session)
   const terminalRef = useRef<TerminalHandle | null>(null)
+  const [ready, setReady] = useState(false)
 
   useEffect(() => {
+    if (!ready) return
     subscribeToTab(tabId, SCROLLBACK, {
       onSnapshot: (payload) => {
-        terminalRef.current?.clear()
-        terminalRef.current?.write(payload)
+        const handle = terminalRef.current
+        if (typeof handle?.clear !== 'function') return
+        handle.clear()
+        handle.write(payload)
       },
       onBytes: (b64) => {
-        terminalRef.current?.write(decode(b64))
+        const handle = terminalRef.current
+        if (typeof handle?.write !== 'function') return
+        handle.write(decode(b64))
       },
     })
     return () => {
       unsubscribeFromTab(tabId)
     }
-  }, [tabId])
+  }, [tabId, ready])
+
+  const onReady = async () => {
+    setReady(true)
+  }
 
   const onData = async (data: string) => {
     writeToTab(tabId, data)
@@ -43,6 +53,7 @@ export function useTabData(tabId: string) {
     terminalRef,
     onData,
     onResize,
+    onReady,
     status: session.status,
     deviceName: session.deviceName,
   }
