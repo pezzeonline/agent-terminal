@@ -6,7 +6,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tauri::ipc::Channel;
@@ -594,6 +594,14 @@ pub fn spawn_pty(
 /// Runs the same "already-alive but reader thread just died" check
 /// `try_reattach` uses so mobile-triggered spawn of an entry-in-transition
 /// doesn't race with the reader thread's exit path.
+///
+/// Concurrent-call safety: two mobile clients subscribing to the same
+/// sleeping tab at once would both pass the map check and both call
+/// `spawn_pty`, whose unconditional `pty_map.insert` overwrites the
+/// first entry — leaking the first child + reader thread. The
+/// `SPAWN_GATE` global mutex serialises the check-and-spawn window so
+/// only one caller proceeds per tab. Contention is negligible because
+/// spawn is a rare, ms-scale operation.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_pty_if_absent(
     app: AppHandle,
@@ -606,8 +614,9 @@ pub fn spawn_pty_if_absent(
     cwd: Option<String>,
     shell: Option<String>,
 ) -> Result<bool, String> {
+    let _spawn_gate = SPAWN_GATE.lock().expect("SPAWN_GATE poisoned");
     {
-        let map = pty_map.lock().unwrap();
+        let map = pty_map.lock().expect("pty_map lock poisoned");
         if let Some(handle) = map.get(&tab_id) {
             if handle.reader_alive.load(Ordering::Acquire) {
                 return Ok(false);
@@ -628,3 +637,10 @@ pub fn spawn_pty_if_absent(
     )?;
     Ok(true)
 }
+
+/// Serialises concurrent `spawn_pty_if_absent` calls so two mobile
+/// clients subscribing to the same sleeping tab_id at once cannot both
+/// pass the pty_map check and both spawn. Global rather than per-tab
+/// because auto-spawn is rare and the whole operation is ms-scale; the
+/// simplicity of one Mutex beats the storage of a per-tab HashMap.
+static SPAWN_GATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));

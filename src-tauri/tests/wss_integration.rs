@@ -12,7 +12,7 @@
 // app).
 
 use agent_terminal_lib::auth_stub::AuthStub;
-use agent_terminal_lib::{CwdTable, ModEngineHandle};
+use agent_terminal_lib::ModEngineHandle;
 use agent_terminal_lib::projects_cache::ProjectsCache;
 use agent_terminal_lib::protocol::{ClientFrame, ServerFrame};
 use agent_terminal_lib::pty_manager::PtyMap;
@@ -65,7 +65,7 @@ async fn spawn_server(token: &str) -> (SocketAddr, Arc<ServerState>) {
         // or Resize dispatch (they need a real PtyHandle), so the mod
         // engine channels this drops onto never matter.
         mod_engine_handle: ModEngineHandle::noop(),
-        cwd_table: Arc::new(Mutex::new(HashMap::new())) as CwdTable,
+        cwd_table: Arc::new(Mutex::new(HashMap::new())),
         // No AppHandle in tests — auto-spawn on Subscribe gates on Some
         // and treats None as "skip spawn", so Subscribe-to-sleeping-tab
         // still routes through subscribe_remote (yields no bytes because

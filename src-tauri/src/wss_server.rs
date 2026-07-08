@@ -298,46 +298,50 @@ async fn dispatch_client_frame(
             // cwd chain: TabSummary.last_cwd (OSC 7-derived, persisted)
             // → TabSummary.cwd → spawn_pty's HOME default. Shell comes
             // from `cmd` when set, matching desktop's semantics.
-            let needs_spawn = !state.pty_map.lock().unwrap().contains_key(&tab_id);
-            if needs_spawn {
-                if let (Some(app), Some(tab)) = (
-                    state.app_handle.as_ref(),
-                    state.projects_cache.find_tab(&tab_id),
+            //
+            // We do NOT gate on `pty_map.contains_key` here — a
+            // just-died reader thread leaves the entry present with
+            // `reader_alive=false`, and spawn_pty_if_absent's internal
+            // check handles both "healthy PTY, skip" and "zombie entry,
+            // respawn" correctly. Duplicating the check outside the
+            // helper would miss the zombie case.
+            if let (Some(app), Some(tab)) = (
+                state.app_handle.as_ref(),
+                state.projects_cache.find_tab(&tab_id),
+            ) {
+                // Desktop's addTab initializes `cmd: ''` for every new
+                // tab; that arrives here as Some("") which spawn_pty
+                // would try to run as the shell path, spawning an empty
+                // command that crashes on write and hits the reader
+                // thread's respawn-rate limit within seconds. Normalise
+                // empty strings to None so spawn_pty falls back to
+                // $SHELL / /bin/zsh — matching the desktop open_tab
+                // path, which never passes `shell` at all.
+                let cwd = tab
+                    .last_cwd
+                    .clone()
+                    .or_else(|| tab.cwd.clone())
+                    .filter(|s| !s.is_empty());
+                let shell = tab.cmd.clone().filter(|s| !s.is_empty());
+                match spawn_pty_if_absent(
+                    app.clone(),
+                    &state.pty_map,
+                    state.mod_engine_handle.clone(),
+                    state.cwd_table.clone(),
+                    Arc::clone(&state.hub),
+                    Some(Arc::clone(&state.projects_cache)),
+                    tab_id.clone(),
+                    cwd,
+                    shell,
                 ) {
-                    // Desktop's addTab initializes `cmd: ''` for every new
-                    // tab; that arrives here as Some("") which spawn_pty
-                    // would try to run as the shell path, spawning an empty
-                    // command that crashes on write and hits the reader
-                    // thread's respawn-rate limit within seconds. Normalise
-                    // empty strings to None so spawn_pty falls back to
-                    // $SHELL / /bin/zsh — matching the desktop open_tab
-                    // path, which never passes `shell` at all.
-                    let cwd = tab
-                        .last_cwd
-                        .clone()
-                        .or_else(|| tab.cwd.clone())
-                        .filter(|s| !s.is_empty());
-                    let shell = tab.cmd.clone().filter(|s| !s.is_empty());
-                    match spawn_pty_if_absent(
-                        app.clone(),
-                        &state.pty_map,
-                        state.mod_engine_handle.clone(),
-                        state.cwd_table.clone(),
-                        Arc::clone(&state.hub),
-                        Some(Arc::clone(&state.projects_cache)),
-                        tab_id.clone(),
-                        cwd,
-                        shell,
-                    ) {
-                        Ok(true) => {
-                            // is_spawned overlay just flipped for this
-                            // tab; broadcast so every mobile client sees
-                            // the change in the next Projects push.
-                            state.projects_cache.notify_spawn_change();
-                        }
-                        Ok(false) => {}
-                        Err(e) => eprintln!("[wss] auto-spawn {tab_id} failed: {e}"),
+                    Ok(true) => {
+                        // is_spawned overlay just flipped for this
+                        // tab; broadcast so every mobile client sees
+                        // the change in the next Projects push.
+                        state.projects_cache.notify_spawn_change();
                     }
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[wss] auto-spawn {tab_id} failed: {e}"),
                 }
             }
 
