@@ -18,7 +18,7 @@
 
 use crate::auth_stub::AuthStub;
 use crate::mod_engine::ModEngineHandle;
-use crate::project_registry::ProjectRegistry;
+use crate::projects_cache::ProjectsCache;
 use crate::protocol::{ClientFrame, ServerFrame};
 use crate::pty_manager::PtyMap;
 use crate::stream_hub::{StreamHub, SubscriberId};
@@ -57,7 +57,12 @@ pub enum WssError {
 pub struct ServerState {
     pub hub: Arc<StreamHub>,
     pub auth: Arc<AuthStub>,
-    pub registry: Arc<ProjectRegistry>,
+    /// Cache of the desktop's full project + tab tree. Populated by React
+    /// via `sync_projects_to_wss` (source of truth for mutations) and
+    /// pre-loaded from `projects.json` on cold start so a mobile client
+    /// that connects before React has finished mounting sees something
+    /// useful.
+    pub projects_cache: Arc<ProjectsCache>,
     /// Shared with the Tauri app so a Write / Resize frame from a
     /// remote client writes to the same PtyHandle the desktop
     /// frontend does. Concurrent access under the existing
@@ -172,7 +177,7 @@ async fn connection_task(mut socket: WebSocket, state: Arc<ServerState>) {
     {
         return;
     }
-    let projects = state.registry.projects();
+    let projects = state.projects_cache.projects_with_spawn_status(&state.pty_map);
     if send_frame(&mut socket, &ServerFrame::Projects { data: projects })
         .await
         .is_err()
@@ -195,7 +200,7 @@ async fn connection_task(mut socket: WebSocket, state: Arc<ServerState>) {
     //   tab tree stays live-synced with the desktop's.
     let (outbox_tx, mut outbox_rx) = mpsc::unbounded_channel::<ServerFrame>();
     let mut subscriptions: HashMap<String, SubscriberId> = HashMap::new();
-    let mut changes = state.registry.subscribe_changes();
+    let mut changes = state.projects_cache.subscribe_changes();
     // Consume the current value so `changed().await` blocks until the
     // NEXT notify — otherwise the first iteration would fire
     // immediately and re-send the projects we just pushed above.
@@ -234,15 +239,15 @@ async fn connection_task(mut socket: WebSocket, state: Arc<ServerState>) {
                 }
             }
 
-            // ProjectRegistry fired notify_change. Re-read the tab
-            // tree and enqueue a fresh Projects frame; the outbox
-            // branch above will send it on the next iteration. Any
-            // send error on `changed().await` means the sender has
-            // been dropped — impossible in practice (registry is
+            // ProjectsCache changed (React synced a fresh $projects
+            // via sync_projects_to_wss, or a cold-start load ran).
+            // Re-read the tree and enqueue a fresh Projects frame.
+            // Any send error on `changed().await` means the sender
+            // has been dropped — impossible in practice (cache is
             // long-lived) but treat as a clean exit anyway.
             change = changes.changed() => {
                 if change.is_err() { break; }
-                let projects = state.registry.projects();
+                let projects = state.projects_cache.projects_with_spawn_status(&state.pty_map);
                 let _ = outbox_tx.send(ServerFrame::Projects { data: projects });
             }
         }

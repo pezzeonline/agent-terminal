@@ -12,8 +12,8 @@
 // app).
 
 use agent_terminal_lib::auth_stub::AuthStub;
-use agent_terminal_lib::{CwdTable, ModEngineHandle};
-use agent_terminal_lib::project_registry::ProjectRegistry;
+use agent_terminal_lib::ModEngineHandle;
+use agent_terminal_lib::projects_cache::ProjectsCache;
 use agent_terminal_lib::protocol::{ClientFrame, ServerFrame};
 use agent_terminal_lib::pty_manager::PtyMap;
 use agent_terminal_lib::stream_hub::StreamHub;
@@ -50,16 +50,16 @@ async fn spawn_server(token: &str) -> (SocketAddr, Arc<ServerState>) {
 
     let hub = StreamHub::new(None);
     let pty_map: PtyMap = Arc::new(Mutex::new(HashMap::new()));
-    let cwd_table: CwdTable = Arc::new(Mutex::new(HashMap::new()));
-    let registry = Arc::new(ProjectRegistry::new(
-        Arc::clone(&pty_map),
-        Arc::clone(&cwd_table),
-    ));
+    // Tests exercise the projects push shape with an empty cache. The
+    // sync_projects_to_wss path (React → cache) is unit-tested in
+    // projects_cache::tests; here we just verify the WSS server reads
+    // from an empty cache correctly.
+    let projects_cache = Arc::new(ProjectsCache::new());
 
     let state = Arc::new(ServerState {
         hub: Arc::clone(&hub),
         auth,
-        registry,
+        projects_cache,
         pty_map,
         // Test-only noop handle — the tests below don't exercise Write
         // or Resize dispatch (they need a real PtyHandle), so the mod

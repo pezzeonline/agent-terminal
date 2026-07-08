@@ -1,5 +1,5 @@
 use crate::mod_engine::{CwdTable, ModEngineHandle};
-use crate::project_registry::ProjectRegistry;
+use crate::projects_cache::ProjectsCache;
 use crate::stream_hub::StreamHub;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
@@ -113,9 +113,9 @@ struct ReaderCtx {
     hub: Arc<StreamHub>,
     /// Fired on respawn_in_place so paired WSS clients push a fresh
     /// Projects frame reflecting the new PtyHandle's state. Optional so
-    /// spawn_pty callers that don't yet have a registry (existing tests,
+    /// spawn_pty callers that don't yet have a cache (existing tests,
     /// pre-integration paths) can still work.
-    registry: Option<Arc<ProjectRegistry>>,
+    projects_cache: Option<Arc<ProjectsCache>>,
 }
 
 /// Spawns the reader thread that forwards PTY bytes to the frontend.
@@ -321,7 +321,7 @@ fn respawn_in_place(ctx: &ReaderCtx) -> Result<RespawnOutcome, String> {
             pty_map: ctx.pty_map.clone(),
             cwd_table: ctx.cwd_table.clone(),
             hub: Arc::clone(&ctx.hub),
-            registry: ctx.registry.clone(),
+            projects_cache: ctx.projects_cache.clone(),
         },
         new_reader,
     );
@@ -335,10 +335,10 @@ fn respawn_in_place(ctx: &ReaderCtx) -> Result<RespawnOutcome, String> {
     ).ok();
 
     // Notify WSS clients so mobile UI's TabState / project tree
-    // reflects the new PtyHandle. No-op when the registry hasn't been
+    // reflects the new PtyHandle. No-op when the cache hasn't been
     // wired (tests, legacy callers).
-    if let Some(registry) = ctx.registry.as_ref() {
-        registry.notify_change();
+    if let Some(cache) = ctx.projects_cache.as_ref() {
+        cache.notify_spawn_change();
     }
 
     Ok(RespawnOutcome::Respawned)
@@ -408,7 +408,7 @@ pub fn try_reattach(
             pty_map: pty_map.clone(),
             cwd_table,
             hub,
-            registry: None,
+            projects_cache: None,
         },
         reader,
     );
@@ -491,7 +491,7 @@ pub fn spawn_pty(
     mod_handle: ModEngineHandle,
     cwd_table: CwdTable,
     hub: Arc<StreamHub>,
-    registry: Option<Arc<ProjectRegistry>>,
+    projects_cache: Option<Arc<ProjectsCache>>,
     tab_id: String,
     cwd: Option<String>,
     shell: Option<String>,
@@ -562,7 +562,7 @@ pub fn spawn_pty(
             pty_map: pty_map.clone(),
             cwd_table,
             hub,
-            registry,
+            projects_cache,
         },
         reader,
     );
