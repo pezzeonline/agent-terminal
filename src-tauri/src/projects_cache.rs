@@ -24,6 +24,7 @@ use crate::pty_manager::PtyMap;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
 
 /// Owning cache. Callers hold an `Arc<ProjectsCache>` from `app.manage()`.
@@ -32,6 +33,13 @@ pub struct ProjectsCache {
     change_tx: watch::Sender<u64>,
     change_rx: watch::Receiver<u64>,
     version: Mutex<u64>,
+    /// Set to true once React has called `sync_projects_to_wss` at least
+    /// once with `hydrated: true`. WSS CRUD dispatch gates on this so
+    /// mobile ops arriving during the cold-start window get an OpError
+    /// instead of vanishing into a Tauri event bus with no listener.
+    /// Cold-start `load_from_disk` populates the cache for read broadcast
+    /// but does NOT flip this flag; only React's explicit signal does.
+    hydrated: AtomicBool,
 }
 
 impl ProjectsCache {
@@ -42,6 +50,7 @@ impl ProjectsCache {
             change_tx: tx,
             change_rx: rx,
             version: Mutex::new(0),
+            hydrated: AtomicBool::new(false),
         }
     }
 
@@ -52,6 +61,14 @@ impl ProjectsCache {
         let mut v = self.version.lock().expect("version lock poisoned");
         *v = v.wrapping_add(1);
         let _ = self.change_tx.send(*v);
+    }
+
+    pub fn set_hydrated(&self) {
+        self.hydrated.store(true, Ordering::Release);
+    }
+
+    pub fn is_hydrated(&self) -> bool {
+        self.hydrated.load(Ordering::Acquire)
     }
 
     /// Snapshot the current tree for broadcast. Every WSS `Projects` push
@@ -222,6 +239,17 @@ mod tests {
 
     fn empty_pty_map() -> PtyMap {
         Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    #[test]
+    fn hydrated_flag_starts_false_and_flips_on_set() {
+        let cache = ProjectsCache::new();
+        assert!(!cache.is_hydrated());
+        cache.set_hydrated();
+        assert!(cache.is_hydrated());
+        // Idempotent.
+        cache.set_hydrated();
+        assert!(cache.is_hydrated());
     }
 
     #[test]

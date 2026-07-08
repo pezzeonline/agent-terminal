@@ -1,5 +1,7 @@
 use crate::mod_engine::ModEngine;
 use crate::projects_cache::{ProjectsCache, StoredProject};
+use crate::protocol::ServerFrame;
+use crate::wss_server::MobileOpInboxes;
 use crate::pty_manager::{spawn_pty, try_reattach, PtyDataPayload, PtyMap, ReattachResult};
 use crate::stream_hub::StreamHub;
 use portable_pty::PtySize;
@@ -183,8 +185,42 @@ pub async fn save_projects(projects: serde_json::Value) -> Result<(), String> {
 pub async fn sync_projects_to_wss(
     projects_cache: State<'_, Arc<ProjectsCache>>,
     projects: Vec<StoredProject>,
+    hydrated: bool,
 ) -> Result<(), String> {
     projects_cache.set(projects.into_iter().map(Into::into).collect());
+    // Phase B: React's first sync sets `hydrated: true` from
+    // main.tsx::bootstrap after listProjects() resolves. Subsequent
+    // per-mutation calls also carry `hydrated: true` (idempotent). WSS
+    // CRUD dispatch gates on this flag so mobile ops arriving during
+    // the cold-start window get a clean OpError instead of vanishing
+    // into an unlistened Tauri event bus.
+    if hydrated {
+        projects_cache.set_hydrated();
+    }
+    Ok(())
+}
+
+/// React reports a mobile CRUD op failure back to the WSS server. The
+/// server looks up the outbox we registered when the CRUD frame first
+/// arrived and routes an `OpError` frame to that connection.
+///
+/// Success paths do NOT go through here: the mutation flows through
+/// `$projects.persist()` → `sync_projects_to_wss` → cache broadcast →
+/// mobile observes its own change in the next `Projects` push.
+#[tauri::command]
+pub async fn report_mobile_op_error(
+    inboxes: State<'_, Arc<MobileOpInboxes>>,
+    op_id: u64,
+    reason: String,
+) -> Result<(), String> {
+    if let Some(tx) = inboxes
+        .0
+        .lock()
+        .expect("mobile_op_inboxes lock poisoned")
+        .remove(&op_id)
+    {
+        let _ = tx.send(ServerFrame::OpError { op_id, reason });
+    }
     Ok(())
 }
 
