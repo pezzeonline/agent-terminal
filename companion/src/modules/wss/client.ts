@@ -128,65 +128,65 @@ const pendingOps = new Map<number, PendingOp>()
 
 const OP_TIMEOUT_MS = 10_000
 
-function sendCrud<B extends object>(
-  op:
-    | 'create_project'
-    | 'create_tab'
-    | 'rename_project'
-    | 'rename_tab'
-    | 'remove_project'
-    | 'remove_tab'
-    | 'reorder_tabs',
-  body: B,
-): Promise<never> {
-  const opId = nextOpId++
+// Shared pending-op plumbing: register the op_id in the pending map,
+// arm the timeout, then send the fully-typed frame. Every caller passes
+// a `ClientFrame` built from the generated union — no casts, no escape
+// hatches. TypeScript enforces the exact wire shape at each sender's
+// construction site; a drifted field is a compile error, not a runtime
+// server-close-and-reconnect loop.
+function sendPending(opId: number, frame: ClientFrame): Promise<never> {
   return new Promise<never>((_resolve, reject) => {
     const timer = setTimeout(() => {
       if (pendingOps.has(opId)) {
         pendingOps.delete(opId)
-        reject(new Error(`${op} timed out after ${OP_TIMEOUT_MS} ms`))
+        reject(new Error(`${frame.op} timed out after ${OP_TIMEOUT_MS} ms`))
       }
     }, OP_TIMEOUT_MS)
     pendingOps.set(opId, { reject, timer })
-    // Wire shape: { "op": "...", "body": { "op_id": N, "body": {...} } }
-    //
-    // The outer `body` is serde's adjacent-tag content wrapper
-    // (`#[serde(tag = "op", content = "body")]` on the Rust
-    // ClientFrame enum). Inside that, the enum variant's fields
-    // (`op_id` + a further-nested `body: <ThisBody>`) are laid out as
-    // a struct. Sending `op_id` at the top level (a top-level flatten)
-    // is why the server logs `missing field 'op_id'` — the deserialiser
-    // looks inside the outer `body` and finds only the inner body.
-    send({ op, body: { op_id: opId, body } } as unknown as ClientFrame)
+    send(frame)
   })
 }
 
 export function sendCreateProject(body: CreateProjectBody): Promise<never> {
-  return sendCrud('create_project', body)
+  const op_id = nextOpId++
+  const frame: ClientFrame = { op: 'create_project', body: { op_id, body } }
+  return sendPending(op_id, frame)
 }
 
 export function sendCreateTab(body: CreateTabBody): Promise<never> {
-  return sendCrud('create_tab', body)
+  const op_id = nextOpId++
+  const frame: ClientFrame = { op: 'create_tab', body: { op_id, body } }
+  return sendPending(op_id, frame)
 }
 
 export function sendRenameProject(body: RenameProjectBody): Promise<never> {
-  return sendCrud('rename_project', body)
+  const op_id = nextOpId++
+  const frame: ClientFrame = { op: 'rename_project', body: { op_id, body } }
+  return sendPending(op_id, frame)
 }
 
 export function sendRenameTab(body: RenameTabBody): Promise<never> {
-  return sendCrud('rename_tab', body)
+  const op_id = nextOpId++
+  const frame: ClientFrame = { op: 'rename_tab', body: { op_id, body } }
+  return sendPending(op_id, frame)
 }
 
 export function sendRemoveProject(body: RemoveProjectBody): Promise<never> {
-  return sendCrud('remove_project', body)
+  const op_id = nextOpId++
+  const frame: ClientFrame = { op: 'remove_project', body: { op_id, body } }
+  return sendPending(op_id, frame)
 }
 
 export function sendRemoveTab(body: RemoveTabBody): Promise<never> {
-  return sendCrud('remove_tab', body)
+  const op_id = nextOpId++
+  const frame: ClientFrame = { op: 'remove_tab', body: { op_id, body } }
+  return sendPending(op_id, frame)
 }
 
 export function sendReorderTabs(body: ReorderTabsBody): Promise<never> {
-  return sendCrud('reorder_tabs', body)
+  const op_id = nextOpId++
+  const frame: ClientFrame = { op: 'reorder_tabs', body: { op_id, body } }
+  return sendPending(op_id, frame)
 }
 
 function sendSubscribeOrResume(tabId: string, sub: TabSubscription): void {
