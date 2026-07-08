@@ -1,7 +1,7 @@
 {
   "name": "companion",
   "version": "1.0.0",
-  "main": "expo-router/entry",
+  "main": "index.js",
   "dependencies": {
     "@expo/metro-runtime": "~56.0.16",
     "@expo/react-native-action-sheet": "^4.1.1",
