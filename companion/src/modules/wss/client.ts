@@ -108,11 +108,11 @@ export function resizeTab(tabId: string, cols: number, rows: number): void {
 
 // -------- Phase B: mobile CRUD senders --------
 //
-// Every sender returns a Promise<never> — success is never signalled by
-// the resolved side. The next `Projects` frame carries the mutation
-// and the UI observes it via $session. Only failures land on the
-// promise, via `op_error` frames from the server. Callers use
-// `.catch(...)` to show toasts.
+// Every sender returns Promise<void>. The server signals success with
+// an `op_ok` frame (React reports it via IPC after applying the
+// mutation) and failure with `op_error`. Both frames carry the op_id
+// so this client can route them back to the right pending promise.
+// Callers `await` and `.catch(...)` as with any async call.
 //
 // op_id is a monotonic per-process counter. Overflow after 2^53 is
 // theoretical for a single mobile session; skip the wrap logic.
@@ -120,6 +120,7 @@ export function resizeTab(tabId: string, cols: number, rows: number): void {
 let nextOpId = 1
 
 interface PendingOp {
+  resolve: () => void
   reject: (err: Error) => void
   timer: ReturnType<typeof setTimeout>
 }
@@ -134,56 +135,56 @@ const OP_TIMEOUT_MS = 10_000
 // hatches. TypeScript enforces the exact wire shape at each sender's
 // construction site; a drifted field is a compile error, not a runtime
 // server-close-and-reconnect loop.
-function sendPending(opId: number, frame: ClientFrame): Promise<never> {
-  return new Promise<never>((_resolve, reject) => {
+function sendPending(opId: number, frame: ClientFrame): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       if (pendingOps.has(opId)) {
         pendingOps.delete(opId)
         reject(new Error(`${frame.op} timed out after ${OP_TIMEOUT_MS} ms`))
       }
     }, OP_TIMEOUT_MS)
-    pendingOps.set(opId, { reject, timer })
+    pendingOps.set(opId, { resolve, reject, timer })
     send(frame)
   })
 }
 
-export function sendCreateProject(body: CreateProjectBody): Promise<never> {
+export function sendCreateProject(body: CreateProjectBody): Promise<void> {
   const op_id = nextOpId++
   const frame: ClientFrame = { op: 'create_project', body: { op_id, body } }
   return sendPending(op_id, frame)
 }
 
-export function sendCreateTab(body: CreateTabBody): Promise<never> {
+export function sendCreateTab(body: CreateTabBody): Promise<void> {
   const op_id = nextOpId++
   const frame: ClientFrame = { op: 'create_tab', body: { op_id, body } }
   return sendPending(op_id, frame)
 }
 
-export function sendRenameProject(body: RenameProjectBody): Promise<never> {
+export function sendRenameProject(body: RenameProjectBody): Promise<void> {
   const op_id = nextOpId++
   const frame: ClientFrame = { op: 'rename_project', body: { op_id, body } }
   return sendPending(op_id, frame)
 }
 
-export function sendRenameTab(body: RenameTabBody): Promise<never> {
+export function sendRenameTab(body: RenameTabBody): Promise<void> {
   const op_id = nextOpId++
   const frame: ClientFrame = { op: 'rename_tab', body: { op_id, body } }
   return sendPending(op_id, frame)
 }
 
-export function sendRemoveProject(body: RemoveProjectBody): Promise<never> {
+export function sendRemoveProject(body: RemoveProjectBody): Promise<void> {
   const op_id = nextOpId++
   const frame: ClientFrame = { op: 'remove_project', body: { op_id, body } }
   return sendPending(op_id, frame)
 }
 
-export function sendRemoveTab(body: RemoveTabBody): Promise<never> {
+export function sendRemoveTab(body: RemoveTabBody): Promise<void> {
   const op_id = nextOpId++
   const frame: ClientFrame = { op: 'remove_tab', body: { op_id, body } }
   return sendPending(op_id, frame)
 }
 
-export function sendReorderTabs(body: ReorderTabsBody): Promise<never> {
+export function sendReorderTabs(body: ReorderTabsBody): Promise<void> {
   const op_id = nextOpId++
   const frame: ClientFrame = { op: 'reorder_tabs', body: { op_id, body } }
   return sendPending(op_id, frame)
@@ -337,6 +338,15 @@ function dispatchFrame(frame: ServerFrame): void {
       clearTimeout(pending.timer)
       pendingOps.delete(frame.body.op_id)
       pending.reject(new Error(frame.body.reason))
+    }
+    return
+  }
+  if (frame.op === 'op_ok') {
+    const pending = pendingOps.get(frame.body.op_id)
+    if (pending) {
+      clearTimeout(pending.timer)
+      pendingOps.delete(frame.body.op_id)
+      pending.resolve()
     }
   }
 }

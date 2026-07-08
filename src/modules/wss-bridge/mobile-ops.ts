@@ -101,6 +101,10 @@ export async function installMobileOpsListener(): Promise<void> {
     const { op, op_id, body } = event.payload
     try {
       applyOp(op, body)
+      // Signal success back so the mobile sender's pending Promise
+      // resolves. Without this the promise waits for the 10 s timeout
+      // even though the mutation applied cleanly.
+      IPC.reportMobileOpOk(op_id).catch(() => {})
     } catch (err) {
       IPC.reportMobileOpError(op_id, String(err)).catch(() => {})
     }

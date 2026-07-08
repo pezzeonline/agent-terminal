@@ -349,6 +349,7 @@ pub fn run() {
             commands::save_projects,
             commands::sync_projects_to_wss,
             commands::report_mobile_op_error,
+            commands::report_mobile_op_ok,
             notifications::notif_set_projects,
             notifications::notif_set_active_tab,
             notifications::notif_set_app_focus,

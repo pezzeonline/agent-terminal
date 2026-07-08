@@ -204,12 +204,21 @@ pub enum ServerFrame {
 
     /// A mobile-originated CRUD op failed. `op_id` echoes the client's
     /// correlation id so the sender can reject the matching pending
-    /// promise. Success paths do not emit a reply frame; observers see
-    /// the mutation in the next `Projects` push.
+    /// promise. The next `Projects` push does NOT arrive after an
+    /// OpError (React never applied the mutation).
     OpError {
         #[typeshare(serialized_as = "u32")]
         op_id: u64,
         reason: String,
+    },
+
+    /// A mobile-originated CRUD op succeeded. `op_id` echoes the client's
+    /// correlation id so the sender can resolve the matching pending
+    /// promise. The next `Projects` push arrives immediately after so
+    /// the client also observes the mutation in state.
+    OpOk {
+        #[typeshare(serialized_as = "u32")]
+        op_id: u64,
     },
 }
 
@@ -507,6 +516,7 @@ mod tests {
                 op_id: 42,
                 reason: "project not found".into(),
             },
+            ServerFrame::OpOk { op_id: 43 },
         ];
         for case in cases {
             let s = serde_json::to_string(&case).expect("encode");
@@ -612,6 +622,18 @@ mod tests {
                         "cwd": "/tmp/notes"
                     }
                 }
+            })
+        );
+    }
+
+    #[test]
+    fn server_op_ok_wire_shape() {
+        let frame = ServerFrame::OpOk { op_id: 43 };
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            json!({
+                "op": "op_ok",
+                "body": { "op_id": 43 }
             })
         );
     }

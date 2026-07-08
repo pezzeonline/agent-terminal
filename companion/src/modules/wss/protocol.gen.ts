@@ -317,13 +317,25 @@ export type ServerFrame =
   /**
    * A mobile-originated CRUD op failed. `op_id` echoes the client's
    * correlation id so the sender can reject the matching pending
-   * promise. Success paths do not emit a reply frame; observers see
-   * the mutation in the next `Projects` push.
+   * promise. The next `Projects` push does NOT arrive after an
+   * OpError (React never applied the mutation).
    */
   | {
       op: 'op_error'
       body: {
         op_id: number
         reason: string
+      }
+    }
+  /**
+   * A mobile-originated CRUD op succeeded. `op_id` echoes the client's
+   * correlation id so the sender can resolve the matching pending
+   * promise. The next `Projects` push arrives immediately after so
+   * the client also observes the mutation in state.
+   */
+  | {
+      op: 'op_ok'
+      body: {
+        op_id: number
       }
     }

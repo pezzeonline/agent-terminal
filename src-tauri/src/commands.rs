@@ -203,10 +203,6 @@ pub async fn sync_projects_to_wss(
 /// React reports a mobile CRUD op failure back to the WSS server. The
 /// server looks up the outbox we registered when the CRUD frame first
 /// arrived and routes an `OpError` frame to that connection.
-///
-/// Success paths do NOT go through here: the mutation flows through
-/// `$projects.persist()` → `sync_projects_to_wss` → cache broadcast →
-/// mobile observes its own change in the next `Projects` push.
 #[tauri::command]
 pub async fn report_mobile_op_error(
     inboxes: State<'_, Arc<MobileOpInboxes>>,
@@ -220,6 +216,26 @@ pub async fn report_mobile_op_error(
         .remove(&op_id)
     {
         let _ = tx.send(ServerFrame::OpError { op_id, reason });
+    }
+    Ok(())
+}
+
+/// React reports a mobile CRUD op succeeded. Routes an OpOk frame back
+/// to the originating client so its pending promise resolves. Without
+/// this, the sender's Promise waits indefinitely until it times out,
+/// even though the mutation applied cleanly.
+#[tauri::command]
+pub async fn report_mobile_op_ok(
+    inboxes: State<'_, Arc<MobileOpInboxes>>,
+    op_id: u64,
+) -> Result<(), String> {
+    if let Some(tx) = inboxes
+        .0
+        .lock()
+        .expect("mobile_op_inboxes lock poisoned")
+        .remove(&op_id)
+    {
+        let _ = tx.send(ServerFrame::OpOk { op_id });
     }
     Ok(())
 }

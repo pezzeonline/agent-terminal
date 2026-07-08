@@ -62,5 +62,13 @@ export const IPC = {
   reportMobileOpError: (opId: number, reason: string) =>
     invoke<void>('report_mobile_op_error', { opId, reason }),
 
+  /**
+   * Report a mobile CRUD op succeeded back to the WSS server so the
+   * originating client's pending promise resolves. Called after the
+   * $projects store action returns without throwing.
+   */
+  reportMobileOpOk: (opId: number) =>
+    invoke<void>('report_mobile_op_ok', { opId }),
+
   listProjects: () => invoke<unknown[]>('list_projects'),
 }
