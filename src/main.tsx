@@ -5,6 +5,7 @@ import { startCwdPersist } from '@/modules/mods/cwd-persist'
 import { startModListener } from '@/modules/mods/mod-listener'
 import { startNotificationsBridge } from '@/modules/notifications/notificationsBridge'
 import { syncNotificationsEnabledToBackend } from '@/modules/notifications/preferences'
+import { installMobileOpsListener } from '@/modules/wss-bridge/mobile-ops'
 import { initNavigation } from '@/modules/stores/$navigation'
 import { $projects } from '@/modules/stores/$projects'
 import { initTabRecencySubscriber } from '@/modules/stores/$tabRecency.init'
@@ -23,13 +24,19 @@ async function bootstrap() {
     const saved = (await IPC.listProjects()) as Project[]
     if (saved.length > 0) {
       $projects.set(saved)
-      // Prime the Rust WSS ProjectsCache with the same state React just
-      // hydrated. Rust's cold-start load_from_disk covers the connection
-      // window before this fires; this ensures both stay in sync when a
-      // future migration transforms `saved` before the store accepts it.
-      IPC.syncProjectsToWss(saved).catch(() => {})
     }
+    // Prime the Rust WSS ProjectsCache AND flip its `hydrated` flag,
+    // even when saved is empty. Rust needs the flag flipped to accept
+    // mobile CRUD ops. If we skipped the call for an empty projects.json
+    // the first mobile CRUD would be rejected forever.
+    IPC.syncProjectsToWss(saved ?? [], true).catch(() => {})
   } catch {}
+
+  // Install the wss:mobile_op listener so any mobile client that fires a
+  // CRUD frame (create_tab, rename_project, etc.) has a receiver on the
+  // React side. Runs before ReactDOM renders so the listener is live the
+  // moment the first WSS connection auth-succeeds.
+  await installMobileOpsListener()
 
   initNavigation()
   initThemeFromStorage()
