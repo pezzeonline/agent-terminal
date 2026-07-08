@@ -158,7 +158,17 @@ pub enum ServerFrame {
 pub struct ProjectSummary {
     pub project_id: String,
     pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default = "default_true")]
+    pub is_expanded: bool,
     pub tabs: Vec<TabSummary>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 // Optional fields on the summary structs use
@@ -180,6 +190,27 @@ pub struct TabSummary {
     /// "claude", "codex", or absent when no agent is running in this tab.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// User-configured cmd override (from desktop $projects). Not the
+    /// running shell path.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cmd: Option<String>,
+    /// Last CWD observed via OSC 7, persisted across sessions on desktop.
+    /// Used as the fallback initial cwd when mobile subscribes to a
+    /// sleeping tab.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_cwd: Option<String>,
+    #[serde(default)]
+    pub pinned: bool,
+    /// Set to true when the user explicitly renamed on desktop. Blocks
+    /// OSC-title updates from overwriting the label; mobile should honour
+    /// the same semantics for the rename op in Phase B.
+    #[serde(default)]
+    pub user_renamed: bool,
+    /// True if a PtyHandle currently exists for this tab_id (tab is live
+    /// on desktop). False for "sleeping" tabs that exist in projects.json
+    /// but have not been visited yet this session.
+    #[serde(default)]
+    pub is_spawned: bool,
 }
 
 #[typeshare]
@@ -253,11 +284,19 @@ mod tests {
                 data: vec![ProjectSummary {
                     project_id: "p1".into(),
                     name: "control-center".into(),
+                    path: Some("/Users/dani/workbench/control-center".into()),
+                    pinned: false,
+                    is_expanded: true,
                     tabs: vec![TabSummary {
                         tab_id: "t1".into(),
                         label: "dev".into(),
                         cwd: Some("/tmp".into()),
                         agent: Some("claude".into()),
+                        cmd: Some("zsh".into()),
+                        last_cwd: Some("/tmp".into()),
+                        pinned: false,
+                        user_renamed: false,
+                        is_spawned: true,
                     }],
                 }],
             },
@@ -409,9 +448,15 @@ mod tests {
             data: vec![ProjectSummary {
                 project_id: "p1".into(),
                 name: "proj".into(),
+                path: None,
+                pinned: false,
+                is_expanded: true,
                 tabs: vec![],
             }],
         };
+        // path omitted (Option::is_none); pinned + is_expanded present
+        // as bare bool. Defaults on decode restore them when a legacy
+        // producer omits the fields.
         assert_eq!(
             serde_json::to_value(&frame).unwrap(),
             json!({
@@ -421,12 +466,46 @@ mod tests {
                         {
                             "project_id": "p1",
                             "name": "proj",
+                            "pinned": false,
+                            "is_expanded": true,
                             "tabs": []
                         }
                     ]
                 }
             })
         );
+    }
+
+    #[test]
+    fn project_summary_accepts_legacy_wire_with_missing_new_fields() {
+        // A producer running the pre-Phase-A protocol emits just
+        // { project_id, name, tabs }. Serde's `#[serde(default)]` on the
+        // additive fields keeps decode working.
+        let raw = json!({
+            "project_id": "p1",
+            "name": "proj",
+            "tabs": []
+        });
+        let p: ProjectSummary = serde_json::from_value(raw).expect("decode legacy");
+        assert!(p.path.is_none());
+        assert!(!p.pinned);
+        // is_expanded default-fn returns true; matches desktop's "existing
+        // pre-field projects default to expanded" semantic.
+        assert!(p.is_expanded);
+    }
+
+    #[test]
+    fn tab_summary_accepts_legacy_wire_with_missing_new_fields() {
+        let raw = json!({
+            "tab_id": "t1",
+            "label": "dev"
+        });
+        let t: TabSummary = serde_json::from_value(raw).expect("decode legacy");
+        assert!(t.cmd.is_none());
+        assert!(t.last_cwd.is_none());
+        assert!(!t.pinned);
+        assert!(!t.user_renamed);
+        assert!(!t.is_spawned);
     }
 
     #[test]
