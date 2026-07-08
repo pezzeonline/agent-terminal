@@ -71,6 +71,7 @@ async fn spawn_server(token: &str) -> (SocketAddr, Arc<ServerState>) {
         // still routes through subscribe_remote (yields no bytes because
         // no PtyHandle exists, matching pre-Phase-A-part-2 behaviour).
         app_handle: None,
+        mobile_op_inboxes: Arc::new(wss_server::MobileOpInboxes::new()),
     });
 
     let state_for_task = Arc::clone(&state);

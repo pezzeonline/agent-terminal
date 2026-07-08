@@ -20,6 +20,7 @@ use crate::auth_stub::AuthStub;
 use crate::mod_engine::{CwdTable, ModEngineHandle};
 use crate::projects_cache::ProjectsCache;
 use crate::protocol::{ClientFrame, ServerFrame};
+use tauri::Emitter;
 use crate::pty_manager::{spawn_pty_if_absent, PtyMap};
 use crate::stream_hub::{StreamHub, SubscriberId};
 use axum::{
@@ -83,6 +84,31 @@ pub struct ServerState {
     /// standing up a full Tauri mock runtime; the auto-spawn branch
     /// gates on `Some` and treats `None` as "no-op, don't spawn".
     pub app_handle: Option<tauri::AppHandle>,
+    /// Per-op-id map from CRUD op_id to the client outbox that fired it.
+    /// Populated when Rust dispatches a `wss:mobile_op` Tauri event to
+    /// React; consulted when React calls the `report_mobile_op_error`
+    /// Tauri command so we route the resulting `OpError` back to the
+    /// mobile client that started the op. Successful ops flow back as
+    /// the next `Projects` push and drain naturally from the pending
+    /// map on the mobile side; here we only carry the failure path.
+    pub mobile_op_inboxes: Arc<MobileOpInboxes>,
+}
+
+/// Failure-path routing for mobile CRUD ops. See ServerState docs.
+pub struct MobileOpInboxes(
+    pub std::sync::Mutex<HashMap<u64, mpsc::UnboundedSender<ServerFrame>>>,
+);
+
+impl MobileOpInboxes {
+    pub fn new() -> Self {
+        Self(std::sync::Mutex::new(HashMap::new()))
+    }
+}
+
+impl Default for MobileOpInboxes {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Bind the WSS server to `addr` and serve until the listener closes.
@@ -430,6 +456,97 @@ async fn dispatch_client_frame(
         ClientFrame::Ping => {
             let _ = outbox_tx.send(ServerFrame::Pong);
         }
+
+        // -------- Phase B: mobile-driven CRUD --------
+        //
+        // Every arm follows the same shape:
+        //   1. Reject if the projects cache has not been hydrated by
+        //      React yet (cold-start window).
+        //   2. Reject if we have no AppHandle (integration test env).
+        //   3. Register this connection's outbox for the op_id BEFORE
+        //      firing the Tauri event so a fast React error report can
+        //      find us.
+        //   4. Emit `wss:mobile_op` for React to consume.
+        //
+        // Success path has no explicit reply: React mutates $projects,
+        // persist() calls syncProjectsToWss, cache broadcasts a fresh
+        // Projects frame to every connected client (including this one).
+        // The mobile side observes its own mutation land and clears its
+        // pending entry.
+        ClientFrame::CreateProject { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, op_id, "create_project", &body);
+        }
+        ClientFrame::CreateTab { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, op_id, "create_tab", &body);
+        }
+        ClientFrame::RenameProject { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, op_id, "rename_project", &body);
+        }
+        ClientFrame::RenameTab { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, op_id, "rename_tab", &body);
+        }
+        ClientFrame::RemoveProject { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, op_id, "remove_project", &body);
+        }
+        ClientFrame::RemoveTab { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, op_id, "remove_tab", &body);
+        }
+        ClientFrame::ReorderTabs { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, op_id, "reorder_tabs", &body);
+        }
+    }
+}
+
+/// Shared plumbing for the seven CRUD arms. Serialises the body,
+/// runs the hydration + app-handle checks, registers the outbox for
+/// the op_id, and emits the Tauri event React listens for.
+fn dispatch_mobile_op<T: serde::Serialize>(
+    state: &ServerState,
+    outbox_tx: &mpsc::UnboundedSender<ServerFrame>,
+    op_id: u64,
+    op: &'static str,
+    body: &T,
+) {
+    if !state.projects_cache.is_hydrated() {
+        let _ = outbox_tx.send(ServerFrame::OpError {
+            op_id,
+            reason: "desktop $projects still hydrating, retry in a moment"
+                .to_string(),
+        });
+        return;
+    }
+    let Some(app) = state.app_handle.as_ref() else {
+        let _ = outbox_tx.send(ServerFrame::OpError {
+            op_id,
+            reason: "app handle unavailable (integration test env)".to_string(),
+        });
+        return;
+    };
+    // Register the outbox BEFORE emitting the event so a fast React
+    // error report can find us.
+    state
+        .mobile_op_inboxes
+        .0
+        .lock()
+        .expect("mobile_op_inboxes lock poisoned")
+        .insert(op_id, outbox_tx.clone());
+    let payload = serde_json::json!({
+        "op": op,
+        "op_id": op_id,
+        "body": body,
+    });
+    if let Err(e) = app.emit("wss:mobile_op", payload) {
+        // Emission failed: reap the inbox and bounce back an error.
+        state
+            .mobile_op_inboxes
+            .0
+            .lock()
+            .expect("mobile_op_inboxes lock poisoned")
+            .remove(&op_id);
+        let _ = outbox_tx.send(ServerFrame::OpError {
+            op_id,
+            reason: e.to_string(),
+        });
     }
 }
 
@@ -480,5 +597,12 @@ fn first_op_name(frame: &ClientFrame) -> &'static str {
         ClientFrame::Write { .. } => "write",
         ClientFrame::Resize { .. } => "resize",
         ClientFrame::Ping => "ping",
+        ClientFrame::CreateProject { .. } => "create_project",
+        ClientFrame::CreateTab { .. } => "create_tab",
+        ClientFrame::RenameProject { .. } => "rename_project",
+        ClientFrame::RenameTab { .. } => "rename_tab",
+        ClientFrame::RemoveProject { .. } => "remove_project",
+        ClientFrame::RemoveTab { .. } => "remove_tab",
+        ClientFrame::ReorderTabs { .. } => "reorder_tabs",
     }
 }
