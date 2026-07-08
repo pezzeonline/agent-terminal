@@ -1,5 +1,5 @@
 use crate::mod_engine::ModEngine;
-use crate::project_registry::ProjectRegistry;
+use crate::projects_cache::{ProjectsCache, StoredProject};
 use crate::pty_manager::{spawn_pty, try_reattach, PtyDataPayload, PtyMap, ReattachResult};
 use crate::stream_hub::StreamHub;
 use portable_pty::PtySize;
@@ -18,7 +18,7 @@ pub async fn open_tab(
     pty_map: State<'_, PtyMap>,
     mod_engine: State<'_, ModEngine>,
     hub: State<'_, Arc<StreamHub>>,
-    registry: State<'_, Arc<ProjectRegistry>>,
+    projects_cache: State<'_, Arc<ProjectsCache>>,
     tab_id: String,
     cwd: Option<String>,
     shell: Option<String>,
@@ -69,15 +69,15 @@ pub async fn open_tab(
         mod_engine.handle(),
         mod_engine.cwd_table(),
         Arc::clone(&hub),
-        Some(Arc::clone(&registry)),
+        Some(Arc::clone(&projects_cache)),
         tab_id,
         cwd,
         shell,
-        on_data,
+        Some(on_data),
     )?;
     // Notify any WSS subscribers that the tab inventory changed so
     // they push a fresh Projects frame to their mobile clients.
-    registry.notify_change();
+    projects_cache.notify_spawn_change();
     Ok(true)
 }
 
@@ -132,7 +132,7 @@ pub async fn resize_pty(
 pub async fn close_tab(
     pty_map: State<'_, PtyMap>,
     hub: State<'_, Arc<StreamHub>>,
-    registry: State<'_, Arc<ProjectRegistry>>,
+    projects_cache: State<'_, Arc<ProjectsCache>>,
     tab_id: String,
 ) -> Result<(), String> {
     // The reader thread reads `closing` on EOF to decide between emitting
@@ -154,7 +154,7 @@ pub async fn close_tab(
     // check sees the same ordering it always did. Fire-and-forget.
     hub.close_tab(&tab_id);
     // Notify WSS subscribers so mobile clients see the tab disappear.
-    registry.notify_change();
+    projects_cache.notify_spawn_change();
     Ok(())
 }
 
@@ -165,6 +165,26 @@ pub async fn save_projects(projects: serde_json::Value) -> Result<(), String> {
     tokio::fs::create_dir_all(&parent).await.map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(&projects).map_err(|e| e.to_string())?;
     tokio::fs::write(&path, json).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Push the desktop React `$projects` nano-store into the WSS
+/// ProjectsCache. React subscribes to `$projects` and invokes this on
+/// every change (including hydration on app boot). The cache broadcasts
+/// to every connected mobile client, so a phone that is already paired
+/// sees create / rename / delete / reorder actions from the desktop
+/// within a network round trip.
+///
+/// `projects` arrives in the frontend camelCase shape (matches Tab and
+/// Project TS types). We reuse the same StoredProject / StoredTab
+/// deserialisation the disk fallback uses, then map to the snake_case
+/// wire ProjectSummary via `Into`.
+#[tauri::command]
+pub async fn sync_projects_to_wss(
+    projects_cache: State<'_, Arc<ProjectsCache>>,
+    projects: Vec<StoredProject>,
+) -> Result<(), String> {
+    projects_cache.set(projects.into_iter().map(Into::into).collect());
     Ok(())
 }
 

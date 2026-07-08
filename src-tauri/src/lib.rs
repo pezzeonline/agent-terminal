@@ -33,7 +33,7 @@ pub mod protocol;
 pub mod auth_stub;
 // pub for direct test coverage. The WSS server (next commit) constructs
 // one at startup and hands it to per-connection tasks.
-pub mod project_registry;
+pub mod projects_cache;
 // pub so integration tests can drive the server directly (spin up on
 // 127.0.0.1:0 with an in-process client).
 pub mod wss_server;
@@ -62,7 +62,7 @@ use tauri::menu::{MenuBuilder, SubmenuBuilder};
 #[cfg(all(target_os = "macos", not(feature = "dev-instance")))]
 use tauri::menu::MenuItemBuilder;
 use auth_stub::AuthStub;
-use project_registry::ProjectRegistry;
+use projects_cache::ProjectsCache;
 use pty_manager::PtyMap;
 use sidecar_client::SidecarClient;
 use std::collections::HashMap;
@@ -250,17 +250,27 @@ pub fn run() {
             let hub_for_wss = Arc::clone(&hub);
             app.manage(hub);
 
-            // Project registry: read view over PtyMap + CwdTable for the
-            // WSS server's Projects push. Fires notify_change from
-            // open_tab / close_tab / respawn_in_place so mobile clients
-            // stay live-synced with the desktop's tab inventory.
-            let pty_map_for_registry = Arc::clone(&pty_map_for_setup);
-            let registry = Arc::new(ProjectRegistry::new(
-                Arc::clone(&pty_map_for_registry),
-                cwd_table,
-            ));
-            let registry_for_wss = Arc::clone(&registry);
-            app.manage(registry);
+            // Projects cache: replaces the pre-Phase-A ProjectRegistry.
+            // React's `$projects` nano-store owns mutations and pushes the
+            // full projects vector to the cache via the
+            // `sync_projects_to_wss` Tauri command on every change. The
+            // WSS server subscribes to the cache's change watch and pushes
+            // a fresh Projects frame to every connected mobile client.
+            //
+            // Cold-start fallback: load projects.json directly from disk
+            // so the ~200 ms window between backend init and React first-
+            // paint does not serve an empty tree to any mobile client
+            // that happens to be reconnecting at just that moment.
+            let projects_cache = Arc::new(ProjectsCache::new());
+            let config_dir_for_cache = dirs::home_dir()
+                .map(|h| h.join(".config").join(identity::NAMESPACE));
+            if let Some(dir) = &config_dir_for_cache {
+                if let Some(initial) = ProjectsCache::load_from_disk(dir) {
+                    projects_cache.set(initial);
+                }
+            }
+            let projects_cache_for_wss = Arc::clone(&projects_cache);
+            app.manage(Arc::clone(&projects_cache));
 
             // WSS server. AuthStub reads (or auto-generates) the dev
             // config file — its bind_addr comes from there. Spawn as a
@@ -279,9 +289,11 @@ pub fn run() {
                         let server_state = Arc::new(ServerState {
                             hub: hub_for_wss,
                             auth: Arc::clone(&auth),
-                            registry: registry_for_wss,
-                            pty_map: Arc::clone(&pty_map_for_registry),
+                            projects_cache: projects_cache_for_wss,
+                            pty_map: Arc::clone(&pty_map_for_setup),
                             mod_engine_handle,
+                            cwd_table,
+                            app_handle: Some(app.handle().clone()),
                         });
                         let bind_addr = auth.bind_addr;
                         app.manage(auth);
@@ -327,6 +339,7 @@ pub fn run() {
             commands::close_tab,
             commands::list_projects,
             commands::save_projects,
+            commands::sync_projects_to_wss,
             notifications::notif_set_projects,
             notifications::notif_set_active_tab,
             notifications::notif_set_app_focus,

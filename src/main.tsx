@@ -23,6 +23,11 @@ async function bootstrap() {
     const saved = (await IPC.listProjects()) as Project[]
     if (saved.length > 0) {
       $projects.set(saved)
+      // Prime the Rust WSS ProjectsCache with the same state React just
+      // hydrated. Rust's cold-start load_from_disk covers the connection
+      // window before this fires; this ensures both stay in sync when a
+      // future migration transforms `saved` before the store accepts it.
+      IPC.syncProjectsToWss(saved).catch(() => {})
     }
   } catch {}
 

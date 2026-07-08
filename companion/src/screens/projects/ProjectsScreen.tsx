@@ -42,13 +42,32 @@ function ProjectRow({ project }: { project: ProjectSummary }) {
   )
 }
 
+// fallow-ignore-next-line complexity
 function TabRow({ tab }: { tab: TabSummary }) {
+  // A tab is "sleeping" when it exists in the desktop's projects.json but
+  // has no live PtyHandle. Tapping still navigates to /tab/[id]; the
+  // subscribe path on the server will auto-spawn the PTY in a follow-up
+  // PR (Phase A step 5). Until then, tapping a sleeping tab produces a
+  // "not spawned" state on the terminal screen.
+  const sleeping = !tab.is_spawned
+  const displayCwd = tab.last_cwd ?? tab.cwd
   return (
     <Link href={`/tab/${tab.tab_id}`} asChild>
-      <Pressable className="rounded-md border border-border bg-card p-3">
-        <Text className="font-mono text-foreground text-sm">{tab.label}</Text>
-        {tab.cwd && (
-          <Text className="text-muted-foreground text-xs">{tab.cwd}</Text>
+      <Pressable
+        className={`rounded-md border border-border bg-card p-3 ${sleeping ? 'opacity-60' : ''}`}
+      >
+        <View className="flex-row items-center gap-2">
+          <Text className="flex-1 font-mono text-foreground text-sm">
+            {tab.label}
+          </Text>
+          {sleeping && (
+            <Text className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground uppercase">
+              sleeping
+            </Text>
+          )}
+        </View>
+        {displayCwd && (
+          <Text className="text-muted-foreground text-xs">{displayCwd}</Text>
         )}
       </Pressable>
     </Link>
