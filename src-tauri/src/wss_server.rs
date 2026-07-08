@@ -304,8 +304,20 @@ async fn dispatch_client_frame(
                     state.app_handle.as_ref(),
                     state.projects_cache.find_tab(&tab_id),
                 ) {
-                    let cwd = tab.last_cwd.clone().or_else(|| tab.cwd.clone());
-                    let shell = tab.cmd.clone();
+                    // Desktop's addTab initializes `cmd: ''` for every new
+                    // tab; that arrives here as Some("") which spawn_pty
+                    // would try to run as the shell path, spawning an empty
+                    // command that crashes on write and hits the reader
+                    // thread's respawn-rate limit within seconds. Normalise
+                    // empty strings to None so spawn_pty falls back to
+                    // $SHELL / /bin/zsh — matching the desktop open_tab
+                    // path, which never passes `shell` at all.
+                    let cwd = tab
+                        .last_cwd
+                        .clone()
+                        .or_else(|| tab.cwd.clone())
+                        .filter(|s| !s.is_empty());
+                    let shell = tab.cmd.clone().filter(|s| !s.is_empty());
                     match spawn_pty_if_absent(
                         app.clone(),
                         &state.pty_map,
