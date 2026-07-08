@@ -2,6 +2,9 @@ import { useActionSheet } from '@expo/react-native-action-sheet'
 import { Link } from 'expo-router'
 import { useState } from 'react'
 import { Alert, FlatList, Pressable, Text, View } from 'react-native'
+import DraggableFlatList, {
+  type RenderItemParams,
+} from 'react-native-draggable-flatlist'
 import {
   sendRemoveProject,
   sendRemoveTab,
@@ -58,55 +61,23 @@ export function ProjectsScreen() {
     )
   }
 
-  // fallow-ignore-next-line complexity
   function openTabMenu(project: ProjectSummary, tab: TabSummary) {
-    const idxOfTab = project.tabs.findIndex((t) => t.tab_id === tab.tab_id)
-    const canMoveUp = idxOfTab > 0
-    const canMoveDown = idxOfTab < project.tabs.length - 1
-
-    // Reorder-via-menu is the Expo-Go-compatible substitute for the
-    // planned drag-to-reorder UX. react-native-gesture-handler +
-    // react-native-reanimated crash at import in Expo Go on SDK 56, so
-    // draggable-flatlist stays deferred until a dev client lands.
-    const options: string[] = ['Rename']
-    if (canMoveUp) options.push('Move up')
-    if (canMoveDown) options.push('Move down')
-    options.push('Delete', 'Cancel')
-    const renameIdx = 0
-    const moveUpIdx = canMoveUp ? 1 : -1
-    const moveDownIdx = canMoveDown ? (canMoveUp ? 2 : 1) : -1
-    const deleteIdx = options.length - 2
-    const cancelIdx = options.length - 1
-
     showActionSheetWithOptions(
       {
-        options,
-        destructiveButtonIndex: deleteIdx,
-        cancelButtonIndex: cancelIdx,
+        options: ['Rename', 'Delete', 'Cancel'],
+        destructiveButtonIndex: 1,
+        cancelButtonIndex: 2,
         title: tab.label,
       },
-      // fallow-ignore-next-line complexity
       (idx) => {
-        if (idx === renameIdx) {
+        if (idx === 0) {
           setRenameTarget({
             kind: 'tab',
             projectId: project.project_id,
             tabId: tab.tab_id,
             currentLabel: tab.label,
           })
-        } else if (idx === moveUpIdx) {
-          sendReorderTabs({
-            project_id: project.project_id,
-            old_index: idxOfTab,
-            new_index: idxOfTab - 1,
-          }).catch((err) => Alert.alert('Move failed', String(err)))
-        } else if (idx === moveDownIdx) {
-          sendReorderTabs({
-            project_id: project.project_id,
-            old_index: idxOfTab,
-            new_index: idxOfTab + 1,
-          }).catch((err) => Alert.alert('Move failed', String(err)))
-        } else if (idx === deleteIdx) {
+        } else if (idx === 1) {
           Alert.alert('Delete tab?', tab.label, [
             { text: 'Cancel', style: 'cancel' },
             {
@@ -189,6 +160,26 @@ function ProjectRow({
   onTabLongPress,
   onAddTab,
 }: ProjectRowProps) {
+  function handleDragEnd(data: TabSummary[]) {
+    // DraggableFlatList gives us the new order after the drop. Compute
+    // the delta as the first mismatched index; that's the (oldIdx,
+    // newIdx) pair for a single move. Matches $projects.reorderTabs's
+    // signature 1:1 so the mobile-ops listener maps trivially.
+    for (let newIdx = 0; newIdx < data.length; newIdx += 1) {
+      const moved = data[newIdx]
+      if (!moved) continue
+      const oldIdx = project.tabs.findIndex((t) => t.tab_id === moved.tab_id)
+      if (oldIdx !== newIdx) {
+        sendReorderTabs({
+          project_id: project.project_id,
+          old_index: oldIdx,
+          new_index: newIdx,
+        }).catch((err) => Alert.alert('Reorder failed', String(err)))
+        return
+      }
+    }
+  }
+
   return (
     <View className="gap-2">
       <View className="flex-row items-center justify-between">
@@ -213,38 +204,41 @@ function ProjectRow({
           <Text className="text-foreground text-xs">+ Tab</Text>
         </Pressable>
       </View>
-      <View className="gap-1">
-        {project.tabs.map((tab) => (
-          <TabRow
-            key={tab.tab_id}
-            tab={tab}
-            onLongPress={() => onTabLongPress(tab)}
-          />
-        ))}
-      </View>
+      <DraggableFlatList
+        data={project.tabs}
+        keyExtractor={(tab) => tab.tab_id}
+        onDragEnd={({ data }) => handleDragEnd(data)}
+        activationDistance={5}
+        renderItem={(params) => (
+          <TabRow {...params} onLongPress={() => onTabLongPress(params.item)} />
+        )}
+      />
     </View>
   )
 }
 
-interface TabRowProps {
-  tab: TabSummary
+interface TabRowProps extends RenderItemParams<TabSummary> {
   onLongPress: () => void
 }
 
 // fallow-ignore-next-line complexity
-function TabRow({ tab, onLongPress }: TabRowProps) {
-  const sleeping = !tab.is_spawned
-  const displayCwd = tab.last_cwd ?? tab.cwd
+function TabRow({ item, drag, isActive, onLongPress }: TabRowProps) {
+  const sleeping = !item.is_spawned
+  const displayCwd = item.last_cwd ?? item.cwd
   return (
-    <Link href={`/tab/${tab.tab_id}`} asChild>
+    <Link href={`/tab/${item.tab_id}`} asChild>
       <Pressable
-        onLongPress={onLongPress}
+        onLongPress={() => {
+          drag()
+          onLongPress()
+        }}
         delayLongPress={350}
-        className={`rounded-md border border-border bg-card p-3 ${sleeping ? 'opacity-60' : ''}`}
+        disabled={isActive}
+        className={`mb-1 rounded-md border border-border bg-card p-3 ${sleeping ? 'opacity-60' : ''} ${isActive ? 'opacity-80' : ''}`}
       >
         <View className="flex-row items-center gap-2">
           <Text className="flex-1 font-mono text-foreground text-sm">
-            {tab.label}
+            {item.label}
           </Text>
           {sleeping && (
             <Text className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground uppercase">
