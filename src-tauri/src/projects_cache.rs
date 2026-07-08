@@ -225,9 +225,29 @@ impl From<StoredProject> for ProjectSummary {
     }
 }
 
+/// Compose the PTY `tab_id` key from a project id + the raw (per-
+/// project-unique) tab id stored in `projects.json`. This function is
+/// the SINGLE Rust-side source of the composition formula. The
+/// companion / mobile side receives the composed value on the wire; the
+/// desktop React side has an equivalent function
+/// `makeTabKey(projectId, tabId)` in
+/// `src/screens/workspace/workspace.helpers.ts` that MUST produce the
+/// same string for the same inputs. A drift between the two produces
+/// two separate PtyMap entries for the "same" tab and mobile / desktop
+/// stop sharing a shell (see #85 discussion for the bug that motivated
+/// this).
+///
+/// Regression tests: `compose_tab_id_matches_desktop_makeTabKey` here
+/// pins the Rust side; `makeTabKey.shape.test.ts` in `companion/` pins
+/// the JS side. If either changes without a matching change on the
+/// other, both tests break.
+pub fn compose_tab_id(project_id: &str, raw_tab_id: &str) -> String {
+    format!("{project_id}:{raw_tab_id}")
+}
+
 fn tab_summary_from_stored(project_id: &str, t: StoredTab) -> TabSummary {
     TabSummary {
-        tab_id: format!("{project_id}:{tab_id}", tab_id = t.id),
+        tab_id: compose_tab_id(project_id, &t.id),
         label: t.label,
         cwd: t.last_cwd.clone(),
         agent: None,
@@ -351,6 +371,26 @@ mod tests {
     fn load_from_disk_returns_none_on_missing_file() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(ProjectsCache::load_from_disk(tmp.path()).is_none());
+    }
+
+    /// Pins the `tab_id` composition to `<projectId>:<rawTabId>`. Must
+    /// stay in sync with the companion-side pin in
+    /// `companion/src/screens/workspace/tab-key.shape.test.ts` and with
+    /// the desktop-side `makeTabKey` in
+    /// `src/screens/workspace/workspace.helpers.ts`. If any of the
+    /// three drifts, mobile and desktop stop sharing PTY sessions for
+    /// the "same" tab; both tests should surface the drift on the CI
+    /// side that changed.
+    #[test]
+    fn compose_tab_id_matches_desktop_makeTabKey() {
+        assert_eq!(
+            compose_tab_id("control-center", "shell-a9e7"),
+            "control-center:shell-a9e7",
+        );
+        // Edge case: colons in the raw id (shouldn't occur in practice
+        // but the composition must not smuggle its own delimiter into
+        // parseable state).
+        assert_eq!(compose_tab_id("p", "a:b"), "p:a:b");
     }
 
     #[test]
