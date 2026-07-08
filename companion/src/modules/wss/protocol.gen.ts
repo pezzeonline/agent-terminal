@@ -8,11 +8,38 @@ export interface TabSummary {
   cwd?: string
   /** "claude", "codex", or absent when no agent is running in this tab. */
   agent?: string
+  /**
+   * User-configured cmd override (from desktop $projects). Not the
+   * running shell path.
+   */
+  cmd?: string
+  /**
+   * Last CWD observed via OSC 7, persisted across sessions on desktop.
+   * Used as the fallback initial cwd when mobile subscribes to a
+   * sleeping tab.
+   */
+  last_cwd?: string
+  pinned?: boolean
+  /**
+   * Set to true when the user explicitly renamed on desktop. Blocks
+   * OSC-title updates from overwriting the label; mobile should honour
+   * the same semantics for the rename op in Phase B.
+   */
+  user_renamed?: boolean
+  /**
+   * True if a PtyHandle currently exists for this tab_id (tab is live
+   * on desktop). False for "sleeping" tabs that exist in projects.json
+   * but have not been visited yet this session.
+   */
+  is_spawned?: boolean
 }
 
 export interface ProjectSummary {
   project_id: string
   name: string
+  path?: string
+  pinned?: boolean
+  is_expanded: boolean
   tabs: TabSummary[]
 }
 
