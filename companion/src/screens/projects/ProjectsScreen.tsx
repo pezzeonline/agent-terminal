@@ -5,6 +5,7 @@ import { Alert, FlatList, Pressable, Text, View } from 'react-native'
 import DraggableFlatList, {
   type RenderItemParams,
 } from 'react-native-draggable-flatlist'
+import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import {
   sendRemoveProject,
   sendRemoveTab,
@@ -96,8 +97,12 @@ export function ProjectsScreen() {
     )
   }
 
+  // GestureHandlerRootView wraps THIS screen (not the whole app)
+  // per the Expo tutorial. Placing it here means the gesture-handler
+  // native module isn't touched until the projects route mounts,
+  // avoiding an import-time crash in the root layout.
   return (
-    <>
+    <GestureHandlerRootView style={{ flex: 1 }}>
       <View className="flex-row items-center justify-between border-border border-b bg-background px-4 py-3">
         <Text className="font-semibold text-foreground text-lg">Projects</Text>
         <Pressable
@@ -143,7 +148,7 @@ export function ProjectsScreen() {
         target={renameTarget}
         onDismiss={() => setRenameTarget(null)}
       />
-    </>
+    </GestureHandlerRootView>
   )
 }
 
