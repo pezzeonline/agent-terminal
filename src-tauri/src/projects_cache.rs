@@ -62,7 +62,15 @@ impl ProjectsCache {
     /// live `PtyMap`. React does not know which tabs currently have a
     /// live PTY (spawn is lazy and driven by the terminal-pane mount),
     /// so we compute the flag here at read time.
+    ///
+    /// `contains_key` alone is not enough: the reader thread flips
+    /// `PtyHandle::reader_alive` to false on EOF but does not remove the
+    /// map entry itself (removal happens in `commands::close_tab` or
+    /// via `try_reattach`). During that window a zombie entry would
+    /// wrongly report `is_spawned: true` and mobile would drop the
+    /// 'sleeping' pill on a dead tab. Guard on `reader_alive` too.
     pub fn projects_with_spawn_status(&self, pty_map: &PtyMap) -> Vec<ProjectSummary> {
+        use std::sync::atomic::Ordering;
         let projects = self
             .inner
             .lock()
@@ -73,7 +81,9 @@ impl ProjectsCache {
             .into_iter()
             .map(|mut project| {
                 for tab in &mut project.tabs {
-                    tab.is_spawned = pty.contains_key(&tab.tab_id);
+                    tab.is_spawned = pty
+                        .get(&tab.tab_id)
+                        .is_some_and(|h| h.reader_alive.load(Ordering::Acquire));
                 }
                 project
             })
