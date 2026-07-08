@@ -148,9 +148,16 @@ function sendCrud<B extends object>(
       }
     }, OP_TIMEOUT_MS)
     pendingOps.set(opId, { reject, timer })
-    // cast: the generated ClientFrame union is discriminated on `op`; we
-    // trust the caller-supplied body matches the op's expected shape.
-    send({ op, op_id: opId, body } as unknown as ClientFrame)
+    // Wire shape: { "op": "...", "body": { "op_id": N, "body": {...} } }
+    //
+    // The outer `body` is serde's adjacent-tag content wrapper
+    // (`#[serde(tag = "op", content = "body")]` on the Rust
+    // ClientFrame enum). Inside that, the enum variant's fields
+    // (`op_id` + a further-nested `body: <ThisBody>`) are laid out as
+    // a struct. Sending `op_id` at the top level (a top-level flatten)
+    // is why the server logs `missing field 'op_id'` — the deserialiser
+    // looks inside the outer `body` and finds only the inner body.
+    send({ op, body: { op_id: opId, body } } as unknown as ClientFrame)
   })
 }
 
