@@ -6,7 +6,7 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tauri::ipc::Channel;
@@ -484,6 +484,13 @@ fn build_shell_command(
 // Long signature is the trade-off for keeping spawn_pty callable from both
 // the open_tab command and the respawn / try_reattach paths without a
 // builder. A SpawnConfig struct would be cleaner but is scope creep here.
+//
+// `on_data` is `Option<Channel<PtyDataPayload>>` so mobile-first spawn (via
+// wss_server auto-spawn on Subscribe) can create a PTY with no local
+// WebView Channel. The SharedChannel starts as None; when the desktop
+// later navigates to the same tab, try_reattach swaps in the WebView's
+// Channel and future broadcasts reach both surfaces. Same "reattachable
+// local subscriber" shape the hub was designed around.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_pty(
     app: AppHandle,
@@ -495,7 +502,7 @@ pub fn spawn_pty(
     tab_id: String,
     cwd: Option<String>,
     shell: Option<String>,
-    on_data: Channel<PtyDataPayload>,
+    on_data: Option<Channel<PtyDataPayload>>,
 ) -> Result<(), String> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -517,7 +524,11 @@ pub fn spawn_pty(
     // on_output from the same tab.
     mod_handle.on_tab_open(&tab_id, shell_pid);
 
-    let channel: SharedChannel = Arc::new(Mutex::new(Some(on_data)));
+    // Initial value is Some(channel) for desktop-first spawn, None for
+    // mobile-first spawn. The hub's Local subscriber slot below still gets
+    // wired either way; a None channel is a no-op broadcast target until
+    // try_reattach populates it.
+    let channel: SharedChannel = Arc::new(Mutex::new(on_data));
     let reader_alive = Arc::new(AtomicBool::new(true));
     let closing = Arc::new(AtomicBool::new(false));
     let respawn_history = Arc::new(Mutex::new(Vec::new()));
@@ -569,3 +580,67 @@ pub fn spawn_pty(
 
     Ok(())
 }
+
+/// Spawn a PTY for `tab_id` only if it is not already in the map. Used
+/// by the WSS server when a mobile client subscribes to a sleeping tab
+/// (defined in projects.json but no live PtyHandle). Returns true if a
+/// new PTY was spawned, false if one was already alive.
+///
+/// The spawned PTY has no local WebView Channel; broadcasts fan out
+/// through the hub to remote subscribers only. When the desktop later
+/// navigates to the same tab, `try_reattach` populates the SharedChannel
+/// and the desktop terminal takes over rendering seamlessly.
+///
+/// Runs the same "already-alive but reader thread just died" check
+/// `try_reattach` uses so mobile-triggered spawn of an entry-in-transition
+/// doesn't race with the reader thread's exit path.
+///
+/// Concurrent-call safety: two mobile clients subscribing to the same
+/// sleeping tab at once would both pass the map check and both call
+/// `spawn_pty`, whose unconditional `pty_map.insert` overwrites the
+/// first entry — leaking the first child + reader thread. The
+/// `SPAWN_GATE` global mutex serialises the check-and-spawn window so
+/// only one caller proceeds per tab. Contention is negligible because
+/// spawn is a rare, ms-scale operation.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_pty_if_absent(
+    app: AppHandle,
+    pty_map: &PtyMap,
+    mod_handle: ModEngineHandle,
+    cwd_table: CwdTable,
+    hub: Arc<StreamHub>,
+    projects_cache: Option<Arc<ProjectsCache>>,
+    tab_id: String,
+    cwd: Option<String>,
+    shell: Option<String>,
+) -> Result<bool, String> {
+    let _spawn_gate = SPAWN_GATE.lock().expect("SPAWN_GATE poisoned");
+    {
+        let map = pty_map.lock().expect("pty_map lock poisoned");
+        if let Some(handle) = map.get(&tab_id) {
+            if handle.reader_alive.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+        }
+    }
+    spawn_pty(
+        app,
+        pty_map,
+        mod_handle,
+        cwd_table,
+        hub,
+        projects_cache,
+        tab_id,
+        cwd,
+        shell,
+        None,
+    )?;
+    Ok(true)
+}
+
+/// Serialises concurrent `spawn_pty_if_absent` calls so two mobile
+/// clients subscribing to the same sleeping tab_id at once cannot both
+/// pass the pty_map check and both spawn. Global rather than per-tab
+/// because auto-spawn is rare and the whole operation is ms-scale; the
+/// simplicity of one Mutex beats the storage of a per-tab HashMap.
+static SPAWN_GATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));

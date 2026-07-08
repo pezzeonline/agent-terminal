@@ -65,6 +65,12 @@ async fn spawn_server(token: &str) -> (SocketAddr, Arc<ServerState>) {
         // or Resize dispatch (they need a real PtyHandle), so the mod
         // engine channels this drops onto never matter.
         mod_engine_handle: ModEngineHandle::noop(),
+        cwd_table: Arc::new(Mutex::new(HashMap::new())),
+        // No AppHandle in tests — auto-spawn on Subscribe gates on Some
+        // and treats None as "skip spawn", so Subscribe-to-sleeping-tab
+        // still routes through subscribe_remote (yields no bytes because
+        // no PtyHandle exists, matching pre-Phase-A-part-2 behaviour).
+        app_handle: None,
     });
 
     let state_for_task = Arc::clone(&state);

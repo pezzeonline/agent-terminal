@@ -17,10 +17,10 @@
 // handshake per-device tokens stored in the macOS Keychain.
 
 use crate::auth_stub::AuthStub;
-use crate::mod_engine::ModEngineHandle;
+use crate::mod_engine::{CwdTable, ModEngineHandle};
 use crate::projects_cache::ProjectsCache;
 use crate::protocol::{ClientFrame, ServerFrame};
-use crate::pty_manager::PtyMap;
+use crate::pty_manager::{spawn_pty_if_absent, PtyMap};
 use crate::stream_hub::{StreamHub, SubscriberId};
 use axum::{
     Router,
@@ -70,6 +70,19 @@ pub struct ServerState {
     /// contention shows in profiling we split the lock.
     pub pty_map: PtyMap,
     pub mod_engine_handle: ModEngineHandle,
+    /// Tab OSC 7 cwd table, shared with the mod engine + the desktop
+    /// spawn path. Auto-spawn on Subscribe resolves the initial cwd of
+    /// a sleeping tab against `last_cwd` from the ProjectsCache first;
+    /// this table is threaded to spawn_pty for symmetry with the
+    /// desktop's open_tab flow so a subsequent local visit lands in the
+    /// same cwd via OSC 7.
+    pub cwd_table: CwdTable,
+    /// AppHandle for the Tauri commands + events spawn_pty emits
+    /// (pty:exit, pty:respawned). Cloned into each auto-spawn call.
+    /// `Option` so integration tests can build a ServerState without
+    /// standing up a full Tauri mock runtime; the auto-spawn branch
+    /// gates on `Some` and treats `None` as "no-op, don't spawn".
+    pub app_handle: Option<tauri::AppHandle>,
 }
 
 /// Bind the WSS server to `addr` and serve until the listener closes.
@@ -276,6 +289,62 @@ async fn dispatch_client_frame(
         ClientFrame::Auth { .. } => {}
 
         ClientFrame::Subscribe { tab_id, scrollback } => {
+            // Auto-spawn: mobile clients see every tab the desktop knows
+            // about, including sleeping ones. Tapping a sleeping tab
+            // lands here with no PtyHandle in the map. Create one from
+            // the cache's TabSummary metadata so mobile can drive the
+            // shell without the desktop having to visit the tab first.
+            //
+            // cwd chain: TabSummary.last_cwd (OSC 7-derived, persisted)
+            // → TabSummary.cwd → spawn_pty's HOME default. Shell comes
+            // from `cmd` when set, matching desktop's semantics.
+            //
+            // We do NOT gate on `pty_map.contains_key` here — a
+            // just-died reader thread leaves the entry present with
+            // `reader_alive=false`, and spawn_pty_if_absent's internal
+            // check handles both "healthy PTY, skip" and "zombie entry,
+            // respawn" correctly. Duplicating the check outside the
+            // helper would miss the zombie case.
+            if let (Some(app), Some(tab)) = (
+                state.app_handle.as_ref(),
+                state.projects_cache.find_tab(&tab_id),
+            ) {
+                // Desktop's addTab initializes `cmd: ''` for every new
+                // tab; that arrives here as Some("") which spawn_pty
+                // would try to run as the shell path, spawning an empty
+                // command that crashes on write and hits the reader
+                // thread's respawn-rate limit within seconds. Normalise
+                // empty strings to None so spawn_pty falls back to
+                // $SHELL / /bin/zsh — matching the desktop open_tab
+                // path, which never passes `shell` at all.
+                let cwd = tab
+                    .last_cwd
+                    .clone()
+                    .or_else(|| tab.cwd.clone())
+                    .filter(|s| !s.is_empty());
+                let shell = tab.cmd.clone().filter(|s| !s.is_empty());
+                match spawn_pty_if_absent(
+                    app.clone(),
+                    &state.pty_map,
+                    state.mod_engine_handle.clone(),
+                    state.cwd_table.clone(),
+                    Arc::clone(&state.hub),
+                    Some(Arc::clone(&state.projects_cache)),
+                    tab_id.clone(),
+                    cwd,
+                    shell,
+                ) {
+                    Ok(true) => {
+                        // is_spawned overlay just flipped for this
+                        // tab; broadcast so every mobile client sees
+                        // the change in the next Projects push.
+                        state.projects_cache.notify_spawn_change();
+                    }
+                    Ok(false) => {}
+                    Err(e) => eprintln!("[wss] auto-spawn {tab_id} failed: {e}"),
+                }
+            }
+
             // Drop any prior subscription on the same tab first so we
             // don't leak SubscriberIds if a client re-subscribes.
             if let Some(prev) = subscriptions.remove(&tab_id) {

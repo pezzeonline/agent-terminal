@@ -73,7 +73,7 @@ pub async fn open_tab(
         tab_id,
         cwd,
         shell,
-        on_data,
+        Some(on_data),
     )?;
     // Notify any WSS subscribers that the tab inventory changed so
     // they push a fresh Projects frame to their mobile clients.

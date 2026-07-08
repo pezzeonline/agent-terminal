@@ -229,6 +229,7 @@ pub fn run() {
             // over to Tauri's managed-state store — after `app.manage`
             // moves it, direct access goes away.
             let mod_engine_handle = mod_engine.handle();
+            let cwd_table = mod_engine.cwd_table();
             app.manage(mod_engine);
 
             // Headless-xterm sidecar. Spawned as best-effort so a missing
@@ -291,6 +292,8 @@ pub fn run() {
                             projects_cache: projects_cache_for_wss,
                             pty_map: Arc::clone(&pty_map_for_setup),
                             mod_engine_handle,
+                            cwd_table,
+                            app_handle: Some(app.handle().clone()),
                         });
                         let bind_addr = auth.bind_addr;
                         app.manage(auth);

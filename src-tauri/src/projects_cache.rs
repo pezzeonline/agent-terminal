@@ -90,6 +90,21 @@ impl ProjectsCache {
         let _ = self.change_tx.send(*v);
     }
 
+    /// Find a specific tab across all projects. Used by the WSS server's
+    /// auto-spawn path to resolve the initial cwd + shell of a sleeping
+    /// tab before its PTY is created.
+    pub fn find_tab(&self, tab_id: &str) -> Option<TabSummary> {
+        let projects = self.inner.lock().expect("projects_cache lock poisoned");
+        for project in projects.iter() {
+            for tab in &project.tabs {
+                if tab.tab_id == tab_id {
+                    return Some(tab.clone());
+                }
+            }
+        }
+        None
+    }
+
     pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
         self.change_rx.clone()
     }
@@ -285,6 +300,54 @@ mod tests {
     fn load_from_disk_returns_none_on_missing_file() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(ProjectsCache::load_from_disk(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn find_tab_returns_summary_across_projects() {
+        let cache = ProjectsCache::new();
+        cache.set(vec![
+            ProjectSummary {
+                project_id: "p1".into(),
+                name: "one".into(),
+                path: None,
+                pinned: false,
+                is_expanded: true,
+                tabs: vec![TabSummary {
+                    tab_id: "t1".into(),
+                    label: "a".into(),
+                    cwd: None,
+                    agent: None,
+                    cmd: None,
+                    last_cwd: Some("/tmp".into()),
+                    pinned: false,
+                    user_renamed: false,
+                    is_spawned: false,
+                }],
+            },
+            ProjectSummary {
+                project_id: "p2".into(),
+                name: "two".into(),
+                path: None,
+                pinned: false,
+                is_expanded: true,
+                tabs: vec![TabSummary {
+                    tab_id: "t2".into(),
+                    label: "b".into(),
+                    cwd: None,
+                    agent: None,
+                    cmd: Some("bash".into()),
+                    last_cwd: None,
+                    pinned: false,
+                    user_renamed: false,
+                    is_spawned: false,
+                }],
+            },
+        ]);
+        let t1 = cache.find_tab("t1").expect("t1 should be found");
+        assert_eq!(t1.last_cwd.as_deref(), Some("/tmp"));
+        let t2 = cache.find_tab("t2").expect("t2 should be found");
+        assert_eq!(t2.cmd.as_deref(), Some("bash"));
+        assert!(cache.find_tab("t3").is_none());
     }
 
     #[test]
