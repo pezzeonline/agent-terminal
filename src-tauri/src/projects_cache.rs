@@ -202,31 +202,41 @@ fn default_true() -> bool {
 
 impl From<StoredProject> for ProjectSummary {
     fn from(p: StoredProject) -> Self {
+        // Compose the compound tab_id (`<projectId>:<tabId>`) at the
+        // project-level conversion so it matches the desktop's
+        // `makeTabKey(projectId, tabId)` shape from
+        // `src/screens/workspace/workspace.helpers.ts`. Without this,
+        // mobile subscribes to `<tabId>` while desktop opens the same
+        // tab at `<projectId>:<tabId>` — two PtyMap entries, two
+        // separate shells, zero session sharing.
+        let project_id = p.id;
         ProjectSummary {
-            project_id: p.id,
             name: p.name,
             path: p.path,
             pinned: p.pinned,
             is_expanded: p.is_expanded,
-            tabs: p.tabs.into_iter().map(Into::into).collect(),
+            tabs: p
+                .tabs
+                .into_iter()
+                .map(|t| tab_summary_from_stored(&project_id, t))
+                .collect(),
+            project_id,
         }
     }
 }
 
-impl From<StoredTab> for TabSummary {
-    fn from(t: StoredTab) -> Self {
-        TabSummary {
-            tab_id: t.id,
-            label: t.label,
-            cwd: t.last_cwd.clone(),
-            agent: None,
-            cmd: t.cmd,
-            last_cwd: t.last_cwd,
-            pinned: t.pinned,
-            user_renamed: t.user_renamed,
-            // Filled in at read time by projects_with_spawn_status().
-            is_spawned: false,
-        }
+fn tab_summary_from_stored(project_id: &str, t: StoredTab) -> TabSummary {
+    TabSummary {
+        tab_id: format!("{project_id}:{tab_id}", tab_id = t.id),
+        label: t.label,
+        cwd: t.last_cwd.clone(),
+        agent: None,
+        cmd: t.cmd,
+        last_cwd: t.last_cwd,
+        pinned: t.pinned,
+        user_renamed: t.user_renamed,
+        // Filled in at read time by projects_with_spawn_status().
+        is_spawned: false,
     }
 }
 
@@ -306,7 +316,7 @@ mod tests {
                     "isExpanded": true,
                     "tabs": [
                         {
-                            "id": "control-center:shell",
+                            "id": "shell",
                             "label": "shell",
                             "cmd": "zsh",
                             "pinned": false,
@@ -326,6 +336,9 @@ mod tests {
         assert!(projects[0].is_expanded);
         assert_eq!(projects[0].tabs.len(), 1);
         let tab = &projects[0].tabs[0];
+        // tab_id is composed as `<projectId>:<rawTabId>` to match the
+        // desktop's makeTabKey() convention. Raw tab id in projects.json
+        // was "shell"; composed with project "control-center" gives:
         assert_eq!(tab.tab_id, "control-center:shell");
         assert_eq!(tab.label, "shell");
         assert_eq!(tab.cmd.as_deref(), Some("zsh"));
