@@ -39,5 +39,14 @@ export const IPC = {
   saveProjects: (projects: Project[]) =>
     invoke<void>('save_projects', { projects }),
 
+  /**
+   * Push the current `$projects` snapshot into the Rust WSS ProjectsCache
+   * so mobile clients see it. Fired alongside `saveProjects` on every
+   * mutation. Fire-and-forget: any error is a mobile-only feature dropout,
+   * never a desktop UI failure.
+   */
+  syncProjectsToWss: (projects: Project[]) =>
+    invoke<void>('sync_projects_to_wss', { projects }),
+
   listProjects: () => invoke<unknown[]>('list_projects'),
 }

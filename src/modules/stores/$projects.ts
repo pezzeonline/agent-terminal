@@ -15,6 +15,12 @@ export const $projects = atom<Project[]>([])
 
 function persist(projects: Project[]): void {
   IPC.saveProjects(projects).catch(() => {})
+  // Push the fresh tree into the WSS ProjectsCache so any paired mobile
+  // client sees the change. Fire-and-forget; a stale mobile view is not
+  // a desktop-side failure. Runs alongside `saveProjects` for every
+  // mutation (add/remove/rename/reorder/pin), including the initial
+  // hydration bootstrap in the $session store.
+  IPC.syncProjectsToWss(projects).catch(() => {})
 }
 
 function arrayMove<T>(arr: T[], from: number, to: number): T[] {
