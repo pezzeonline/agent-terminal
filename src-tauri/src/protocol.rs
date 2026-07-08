@@ -89,6 +89,56 @@ pub enum ClientFrame {
     /// higher layer catches "socket is fine but the app-level handler
     /// is stuck" cases.
     Ping,
+
+    // -------- Phase B: mobile-driven CRUD --------
+    //
+    // Every CRUD variant carries an `op_id` (client-generated, monotonic
+    // per-connection). The server does not send an "op ok" reply on
+    // success — the natural feedback is the next `Projects` push which
+    // reflects the mutation. On failure the server sends `OpError` with
+    // the matching `op_id` so the client can attribute the rejection.
+    //
+    // All CRUD is rejected with `OpError { reason: "still hydrating..." }`
+    // until React has synced $projects at least once via
+    // `sync_projects_to_wss(hydrated: true)`.
+    CreateProject {
+        #[typeshare(serialized_as = "u32")]
+        op_id: u64,
+        body: CreateProjectBody,
+    },
+    CreateTab {
+        #[typeshare(serialized_as = "u32")]
+        op_id: u64,
+        body: CreateTabBody,
+    },
+    RenameProject {
+        #[typeshare(serialized_as = "u32")]
+        op_id: u64,
+        body: RenameProjectBody,
+    },
+    RenameTab {
+        #[typeshare(serialized_as = "u32")]
+        op_id: u64,
+        body: RenameTabBody,
+    },
+    RemoveProject {
+        #[typeshare(serialized_as = "u32")]
+        op_id: u64,
+        body: RemoveProjectBody,
+    },
+    RemoveTab {
+        #[typeshare(serialized_as = "u32")]
+        op_id: u64,
+        body: RemoveTabBody,
+    },
+    /// Reorder a tab within a project by index. Matches the desktop's
+    /// existing `$projects.reorderTabs(oldIdx, newIdx)` shape so the
+    /// mobile-ops listener maps 1:1.
+    ReorderTabs {
+        #[typeshare(serialized_as = "u32")]
+        op_id: u64,
+        body: ReorderTabsBody,
+    },
 }
 
 /// Frames sent from the desktop server to a mobile client.
@@ -151,6 +201,74 @@ pub enum ServerFrame {
         cwd: String,
     },
     Pong,
+
+    /// A mobile-originated CRUD op failed. `op_id` echoes the client's
+    /// correlation id so the sender can reject the matching pending
+    /// promise. Success paths do not emit a reply frame; observers see
+    /// the mutation in the next `Projects` push.
+    OpError {
+        #[typeshare(serialized_as = "u32")]
+        op_id: u64,
+        reason: String,
+    },
+}
+
+// -------- Phase B body structs --------
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateProjectBody {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateTabBody {
+    pub project_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cmd: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameProjectBody {
+    pub project_id: String,
+    pub new_name: String,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenameTabBody {
+    pub project_id: String,
+    pub tab_id: String,
+    pub new_label: String,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveProjectBody {
+    pub project_id: String,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoveTabBody {
+    pub project_id: String,
+    pub tab_id: String,
+}
+
+#[typeshare]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReorderTabsBody {
+    pub project_id: String,
+    pub old_index: u32,
+    pub new_index: u32,
 }
 
 #[typeshare]
@@ -260,6 +378,59 @@ mod tests {
                 rows: 40,
             },
             ClientFrame::Ping,
+            // Phase B CRUD variants.
+            ClientFrame::CreateProject {
+                op_id: 1,
+                body: CreateProjectBody {
+                    name: "notes".into(),
+                    path: Some("/tmp/notes".into()),
+                },
+            },
+            ClientFrame::CreateTab {
+                op_id: 2,
+                body: CreateTabBody {
+                    project_id: "notes".into(),
+                    label: Some("shell".into()),
+                    cmd: None,
+                    cwd: Some("/tmp/notes".into()),
+                },
+            },
+            ClientFrame::RenameProject {
+                op_id: 3,
+                body: RenameProjectBody {
+                    project_id: "notes".into(),
+                    new_name: "Notes".into(),
+                },
+            },
+            ClientFrame::RenameTab {
+                op_id: 4,
+                body: RenameTabBody {
+                    project_id: "notes".into(),
+                    tab_id: "notes:shell".into(),
+                    new_label: "main".into(),
+                },
+            },
+            ClientFrame::RemoveProject {
+                op_id: 5,
+                body: RemoveProjectBody {
+                    project_id: "notes".into(),
+                },
+            },
+            ClientFrame::RemoveTab {
+                op_id: 6,
+                body: RemoveTabBody {
+                    project_id: "notes".into(),
+                    tab_id: "notes:shell".into(),
+                },
+            },
+            ClientFrame::ReorderTabs {
+                op_id: 7,
+                body: ReorderTabsBody {
+                    project_id: "notes".into(),
+                    old_index: 0,
+                    new_index: 2,
+                },
+            },
         ];
         for case in cases {
             let s = serde_json::to_string(&case).expect("encode");
@@ -332,6 +503,10 @@ mod tests {
                 cwd: "/tmp".into(),
             },
             ServerFrame::Pong,
+            ServerFrame::OpError {
+                op_id: 42,
+                reason: "project not found".into(),
+            },
         ];
         for case in cases {
             let s = serde_json::to_string(&case).expect("encode");
@@ -408,6 +583,55 @@ mod tests {
         assert_eq!(value["op"], "write");
         assert_eq!(value["body"]["tab_id"], "t1");
         assert_eq!(value["body"]["data"], "echo hi\r");
+    }
+
+    #[test]
+    fn client_create_tab_wire_shape() {
+        // Pins the shape of a CRUD frame with a body struct + op_id.
+        // If typeshare emits `op_id` as anything other than a plain number
+        // on the TS side, the pending-ops map on the client fails to
+        // route OpError back to the right resolver.
+        let frame = ClientFrame::CreateTab {
+            op_id: 7,
+            body: CreateTabBody {
+                project_id: "notes".into(),
+                label: Some("shell".into()),
+                cmd: None,
+                cwd: Some("/tmp/notes".into()),
+            },
+        };
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            json!({
+                "op": "create_tab",
+                "body": {
+                    "op_id": 7,
+                    "body": {
+                        "project_id": "notes",
+                        "label": "shell",
+                        "cwd": "/tmp/notes"
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn server_op_error_wire_shape() {
+        let frame = ServerFrame::OpError {
+            op_id: 42,
+            reason: "project not found".into(),
+        };
+        assert_eq!(
+            serde_json::to_value(&frame).unwrap(),
+            json!({
+                "op": "op_error",
+                "body": {
+                    "op_id": 42,
+                    "reason": "project not found"
+                }
+            })
+        );
     }
 
     #[test]
