@@ -1,6 +1,13 @@
 import { $session, resetSession } from '@/modules/stores/$session'
 import type {
   ClientFrame,
+  CreateProjectBody,
+  CreateTabBody,
+  RemoveProjectBody,
+  RemoveTabBody,
+  RenameProjectBody,
+  RenameTabBody,
+  ReorderTabsBody,
   ServerFrame,
   TabStateSummary,
 } from '@/modules/wss/protocol.gen'
@@ -97,6 +104,82 @@ export function writeToTab(tabId: string, data: string): void {
 
 export function resizeTab(tabId: string, cols: number, rows: number): void {
   send({ op: 'resize', body: { tab_id: tabId, cols, rows } })
+}
+
+// -------- Phase B: mobile CRUD senders --------
+//
+// Every sender returns a Promise<never> — success is never signalled by
+// the resolved side. The next `Projects` frame carries the mutation
+// and the UI observes it via $session. Only failures land on the
+// promise, via `op_error` frames from the server. Callers use
+// `.catch(...)` to show toasts.
+//
+// op_id is a monotonic per-process counter. Overflow after 2^53 is
+// theoretical for a single mobile session; skip the wrap logic.
+
+let nextOpId = 1
+
+interface PendingOp {
+  reject: (err: Error) => void
+  timer: ReturnType<typeof setTimeout>
+}
+
+const pendingOps = new Map<number, PendingOp>()
+
+const OP_TIMEOUT_MS = 10_000
+
+function sendCrud<B extends object>(
+  op:
+    | 'create_project'
+    | 'create_tab'
+    | 'rename_project'
+    | 'rename_tab'
+    | 'remove_project'
+    | 'remove_tab'
+    | 'reorder_tabs',
+  body: B,
+): Promise<never> {
+  const opId = nextOpId++
+  return new Promise<never>((_resolve, reject) => {
+    const timer = setTimeout(() => {
+      if (pendingOps.has(opId)) {
+        pendingOps.delete(opId)
+        reject(new Error(`${op} timed out after ${OP_TIMEOUT_MS} ms`))
+      }
+    }, OP_TIMEOUT_MS)
+    pendingOps.set(opId, { reject, timer })
+    // cast: the generated ClientFrame union is discriminated on `op`; we
+    // trust the caller-supplied body matches the op's expected shape.
+    send({ op, op_id: opId, body } as unknown as ClientFrame)
+  })
+}
+
+export function sendCreateProject(body: CreateProjectBody): Promise<never> {
+  return sendCrud('create_project', body)
+}
+
+export function sendCreateTab(body: CreateTabBody): Promise<never> {
+  return sendCrud('create_tab', body)
+}
+
+export function sendRenameProject(body: RenameProjectBody): Promise<never> {
+  return sendCrud('rename_project', body)
+}
+
+export function sendRenameTab(body: RenameTabBody): Promise<never> {
+  return sendCrud('rename_tab', body)
+}
+
+export function sendRemoveProject(body: RemoveProjectBody): Promise<never> {
+  return sendCrud('remove_project', body)
+}
+
+export function sendRemoveTab(body: RemoveTabBody): Promise<never> {
+  return sendCrud('remove_tab', body)
+}
+
+export function sendReorderTabs(body: ReorderTabsBody): Promise<never> {
+  return sendCrud('reorder_tabs', body)
 }
 
 function sendSubscribeOrResume(tabId: string, sub: TabSubscription): void {
@@ -239,6 +322,15 @@ function dispatchFrame(frame: ServerFrame): void {
   }
   if (frame.op === 'pong') {
     state.pongDeadline = null
+    return
+  }
+  if (frame.op === 'op_error') {
+    const pending = pendingOps.get(frame.body.op_id)
+    if (pending) {
+      clearTimeout(pending.timer)
+      pendingOps.delete(frame.body.op_id)
+      pending.reject(new Error(frame.body.reason))
+    }
   }
 }
 
