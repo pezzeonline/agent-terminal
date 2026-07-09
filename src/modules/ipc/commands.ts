@@ -58,17 +58,19 @@ export const IPC = {
   /**
    * Report a mobile CRUD op failure back to the WSS server. The server
    * routes the resulting OpError frame to the client that fired the op.
+   * `connectionId` was supplied in the wss:mobile_op event payload and
+   * is required for the compound (connection_id, op_id) inbox key.
    */
-  reportMobileOpError: (opId: number, reason: string) =>
-    invoke<void>('report_mobile_op_error', { opId, reason }),
+  reportMobileOpError: (connectionId: number, opId: number, reason: string) =>
+    invoke<void>('report_mobile_op_error', { connectionId, opId, reason }),
 
   /**
    * Report a mobile CRUD op succeeded back to the WSS server so the
    * originating client's pending promise resolves. Called after the
    * $projects store action returns without throwing.
    */
-  reportMobileOpOk: (opId: number) =>
-    invoke<void>('report_mobile_op_ok', { opId }),
+  reportMobileOpOk: (connectionId: number, opId: number) =>
+    invoke<void>('report_mobile_op_ok', { connectionId, opId }),
 
   listProjects: () => invoke<unknown[]>('list_projects'),
 }
