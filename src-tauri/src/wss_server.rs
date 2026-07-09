@@ -468,11 +468,14 @@ async fn dispatch_client_frame(
         //      find us.
         //   4. Emit `wss:mobile_op` for React to consume.
         //
-        // Success path has no explicit reply: React mutates $projects,
-        // persist() calls syncProjectsToWss, cache broadcasts a fresh
-        // Projects frame to every connected client (including this one).
-        // The mobile side observes its own mutation land and clears its
-        // pending entry.
+        // Success path: React applies the mutation via a $projects
+        // store action, then reports it back through the
+        // `report_mobile_op_ok` Tauri command. That routes an
+        // `OpOk { op_id }` frame through this connection's outbox so
+        // the mobile sender's pending promise resolves. persist() also
+        // syncs the fresh tree to the cache which broadcasts a Projects
+        // frame to every connected client, so the mobile view updates
+        // in state around the same instant.
         ClientFrame::CreateProject { op_id, body } => {
             dispatch_mobile_op(&state, &outbox_tx, op_id, "create_project", &body);
         }

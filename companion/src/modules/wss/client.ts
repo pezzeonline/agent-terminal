@@ -137,6 +137,15 @@ const OP_TIMEOUT_MS = 10_000
 // server-close-and-reconnect loop.
 function sendPending(opId: number, frame: ClientFrame): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    // Fast-fail if the socket is closed. `send(frame)` silently no-ops
+    // when readyState !== OPEN, which without this check would leave
+    // the pending entry armed and the caller waiting the full 10 s
+    // timeout for a misleading "timed out" error when the actual state
+    // is "not connected".
+    if (state.socket?.readyState !== WebSocket.OPEN) {
+      reject(new Error(`${frame.op} failed: not connected`))
+      return
+    }
     const timer = setTimeout(() => {
       if (pendingOps.has(opId)) {
         pendingOps.delete(opId)

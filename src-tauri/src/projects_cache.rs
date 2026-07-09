@@ -238,9 +238,9 @@ impl From<StoredProject> for ProjectSummary {
 /// this).
 ///
 /// Regression tests: `compose_tab_id_matches_desktop_makeTabKey` here
-/// pins the Rust side; `makeTabKey.shape.test.ts` in `companion/` pins
-/// the JS side. If either changes without a matching change on the
-/// other, both tests break.
+/// pins the Rust side; `src/screens/workspace/workspace.helpers.test.ts`
+/// pins the desktop React side. If either changes without a matching
+/// change on the other, both tests break.
 pub fn compose_tab_id(project_id: &str, raw_tab_id: &str) -> String {
     format!("{project_id}:{raw_tab_id}")
 }

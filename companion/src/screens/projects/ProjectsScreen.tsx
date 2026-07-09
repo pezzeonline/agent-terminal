@@ -165,6 +165,7 @@ function ProjectRow({
   onTabLongPress,
   onAddTab,
 }: ProjectRowProps) {
+  // fallow-ignore-next-line complexity
   function handleDragEnd(data: TabSummary[]) {
     // DraggableFlatList gives us the new order after the drop. Compute
     // the delta as the first mismatched index; that's the (oldIdx,
@@ -174,6 +175,12 @@ function ProjectRow({
       const moved = data[newIdx]
       if (!moved) continue
       const oldIdx = project.tabs.findIndex((t) => t.tab_id === moved.tab_id)
+      // findIndex returns -1 if the moved tab_id isn't in our current
+      // snapshot (stale render vs. a projects push that removed it).
+      // Sending -1 would fail Rust's u32 decode and drop the socket;
+      // bail out of the whole reorder since the drag is against stale
+      // state anyway.
+      if (oldIdx < 0) return
       if (oldIdx !== newIdx) {
         sendReorderTabs({
           project_id: project.project_id,
