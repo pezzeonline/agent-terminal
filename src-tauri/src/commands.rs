@@ -1,5 +1,7 @@
 use crate::mod_engine::ModEngine;
 use crate::projects_cache::{ProjectsCache, StoredProject};
+use crate::protocol::ServerFrame;
+use crate::wss_server::MobileOpInboxes;
 use crate::pty_manager::{spawn_pty, try_reattach, PtyDataPayload, PtyMap, ReattachResult};
 use crate::stream_hub::StreamHub;
 use portable_pty::PtySize;
@@ -183,8 +185,68 @@ pub async fn save_projects(projects: serde_json::Value) -> Result<(), String> {
 pub async fn sync_projects_to_wss(
     projects_cache: State<'_, Arc<ProjectsCache>>,
     projects: Vec<StoredProject>,
+    hydrated: bool,
 ) -> Result<(), String> {
     projects_cache.set(projects.into_iter().map(Into::into).collect());
+    // Phase B: React's first sync sets `hydrated: true` from
+    // main.tsx::bootstrap after listProjects() resolves. Subsequent
+    // per-mutation calls also carry `hydrated: true` (idempotent). WSS
+    // CRUD dispatch gates on this flag so mobile ops arriving during
+    // the cold-start window get a clean OpError instead of vanishing
+    // into an unlistened Tauri event bus.
+    if hydrated {
+        projects_cache.set_hydrated();
+    }
+    Ok(())
+}
+
+/// React reports a mobile CRUD op failure back to the WSS server. The
+/// server looks up the outbox we registered when the CRUD frame first
+/// arrived and routes an `OpError` frame to that connection.
+///
+/// `connection_id + op_id` compound key: `op_id` alone would collide
+/// across mobile clients since each client's counter starts at 1.
+/// Rust assigns `connection_id` on WebSocket upgrade and threads it
+/// through the `wss:mobile_op` payload; React echoes it back here so
+/// we route to the exact originating outbox.
+#[tauri::command]
+pub async fn report_mobile_op_error(
+    inboxes: State<'_, Arc<MobileOpInboxes>>,
+    connection_id: u64,
+    op_id: u64,
+    reason: String,
+) -> Result<(), String> {
+    if let Some(tx) = inboxes
+        .0
+        .lock()
+        .expect("mobile_op_inboxes lock poisoned")
+        .remove(&(connection_id, op_id))
+    {
+        let _ = tx.send(ServerFrame::OpError { op_id, reason });
+    }
+    Ok(())
+}
+
+/// React reports a mobile CRUD op succeeded. Routes an OpOk frame back
+/// to the originating client so its pending promise resolves. Without
+/// this, the sender's Promise waits indefinitely until it times out,
+/// even though the mutation applied cleanly. See
+/// `report_mobile_op_error` for the connection_id + op_id keying
+/// rationale.
+#[tauri::command]
+pub async fn report_mobile_op_ok(
+    inboxes: State<'_, Arc<MobileOpInboxes>>,
+    connection_id: u64,
+    op_id: u64,
+) -> Result<(), String> {
+    if let Some(tx) = inboxes
+        .0
+        .lock()
+        .expect("mobile_op_inboxes lock poisoned")
+        .remove(&(connection_id, op_id))
+    {
+        let _ = tx.send(ServerFrame::OpOk { op_id });
+    }
     Ok(())
 }
 

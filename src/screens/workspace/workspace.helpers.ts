@@ -1,5 +1,22 @@
 export const MONO_FONT = '"JetBrains Mono", ui-monospace, Menlo, monospace'
 
+/**
+ * Compose the PTY tab_id key from a project id + the raw per-project
+ * tab id. The desktop uses this when opening a tab via `IPC.openTab`.
+ *
+ * IMPORTANT: this composition MUST match the Rust-side
+ * `compose_tab_id` in `src-tauri/src/projects_cache.rs` byte-for-byte.
+ * Rust runs the same formula when handing `TabSummary.tab_id` to the
+ * mobile companion, so a drift here silently produces two separate
+ * PtyMap entries per "same" tab and mobile / desktop stop sharing a
+ * shell. Both sides are pinned by tests:
+ *
+ *   - Rust:    `compose_tab_id_matches_desktop_makeTabKey` in projects_cache.rs
+ *   - Desktop: `workspace.helpers.test.ts` (this folder)
+ *
+ * If you edit this function, update the Rust helper AND both tests in
+ * the same PR.
+ */
 export function makeTabKey(projectId: string, tabId: string): string {
   return `${projectId}:${tabId}`
 }

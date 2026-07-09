@@ -24,6 +24,7 @@ use crate::pty_manager::PtyMap;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
 
 /// Owning cache. Callers hold an `Arc<ProjectsCache>` from `app.manage()`.
@@ -32,6 +33,13 @@ pub struct ProjectsCache {
     change_tx: watch::Sender<u64>,
     change_rx: watch::Receiver<u64>,
     version: Mutex<u64>,
+    /// Set to true once React has called `sync_projects_to_wss` at least
+    /// once with `hydrated: true`. WSS CRUD dispatch gates on this so
+    /// mobile ops arriving during the cold-start window get an OpError
+    /// instead of vanishing into a Tauri event bus with no listener.
+    /// Cold-start `load_from_disk` populates the cache for read broadcast
+    /// but does NOT flip this flag; only React's explicit signal does.
+    hydrated: AtomicBool,
 }
 
 impl ProjectsCache {
@@ -42,6 +50,7 @@ impl ProjectsCache {
             change_tx: tx,
             change_rx: rx,
             version: Mutex::new(0),
+            hydrated: AtomicBool::new(false),
         }
     }
 
@@ -52,6 +61,14 @@ impl ProjectsCache {
         let mut v = self.version.lock().expect("version lock poisoned");
         *v = v.wrapping_add(1);
         let _ = self.change_tx.send(*v);
+    }
+
+    pub fn set_hydrated(&self) {
+        self.hydrated.store(true, Ordering::Release);
+    }
+
+    pub fn is_hydrated(&self) -> bool {
+        self.hydrated.load(Ordering::Acquire)
     }
 
     /// Snapshot the current tree for broadcast. Every WSS `Projects` push
@@ -185,31 +202,61 @@ fn default_true() -> bool {
 
 impl From<StoredProject> for ProjectSummary {
     fn from(p: StoredProject) -> Self {
+        // Compose the compound tab_id (`<projectId>:<tabId>`) at the
+        // project-level conversion so it matches the desktop's
+        // `makeTabKey(projectId, tabId)` shape from
+        // `src/screens/workspace/workspace.helpers.ts`. Without this,
+        // mobile subscribes to `<tabId>` while desktop opens the same
+        // tab at `<projectId>:<tabId>` — two PtyMap entries, two
+        // separate shells, zero session sharing.
+        let project_id = p.id;
         ProjectSummary {
-            project_id: p.id,
             name: p.name,
             path: p.path,
             pinned: p.pinned,
             is_expanded: p.is_expanded,
-            tabs: p.tabs.into_iter().map(Into::into).collect(),
+            tabs: p
+                .tabs
+                .into_iter()
+                .map(|t| tab_summary_from_stored(&project_id, t))
+                .collect(),
+            project_id,
         }
     }
 }
 
-impl From<StoredTab> for TabSummary {
-    fn from(t: StoredTab) -> Self {
-        TabSummary {
-            tab_id: t.id,
-            label: t.label,
-            cwd: t.last_cwd.clone(),
-            agent: None,
-            cmd: t.cmd,
-            last_cwd: t.last_cwd,
-            pinned: t.pinned,
-            user_renamed: t.user_renamed,
-            // Filled in at read time by projects_with_spawn_status().
-            is_spawned: false,
-        }
+/// Compose the PTY `tab_id` key from a project id + the raw (per-
+/// project-unique) tab id stored in `projects.json`. This function is
+/// the SINGLE Rust-side source of the composition formula. The
+/// companion / mobile side receives the composed value on the wire; the
+/// desktop React side has an equivalent function
+/// `makeTabKey(projectId, tabId)` in
+/// `src/screens/workspace/workspace.helpers.ts` that MUST produce the
+/// same string for the same inputs. A drift between the two produces
+/// two separate PtyMap entries for the "same" tab and mobile / desktop
+/// stop sharing a shell (see #85 discussion for the bug that motivated
+/// this).
+///
+/// Regression tests: `compose_tab_id_matches_desktop_makeTabKey` here
+/// pins the Rust side; `src/screens/workspace/workspace.helpers.test.ts`
+/// pins the desktop React side. If either changes without a matching
+/// change on the other, both tests break.
+pub fn compose_tab_id(project_id: &str, raw_tab_id: &str) -> String {
+    format!("{project_id}:{raw_tab_id}")
+}
+
+fn tab_summary_from_stored(project_id: &str, t: StoredTab) -> TabSummary {
+    TabSummary {
+        tab_id: compose_tab_id(project_id, &t.id),
+        label: t.label,
+        cwd: t.last_cwd.clone(),
+        agent: None,
+        cmd: t.cmd,
+        last_cwd: t.last_cwd,
+        pinned: t.pinned,
+        user_renamed: t.user_renamed,
+        // Filled in at read time by projects_with_spawn_status().
+        is_spawned: false,
     }
 }
 
@@ -222,6 +269,17 @@ mod tests {
 
     fn empty_pty_map() -> PtyMap {
         Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    #[test]
+    fn hydrated_flag_starts_false_and_flips_on_set() {
+        let cache = ProjectsCache::new();
+        assert!(!cache.is_hydrated());
+        cache.set_hydrated();
+        assert!(cache.is_hydrated());
+        // Idempotent.
+        cache.set_hydrated();
+        assert!(cache.is_hydrated());
     }
 
     #[test]
@@ -278,7 +336,7 @@ mod tests {
                     "isExpanded": true,
                     "tabs": [
                         {
-                            "id": "control-center:shell",
+                            "id": "shell",
                             "label": "shell",
                             "cmd": "zsh",
                             "pinned": false,
@@ -298,6 +356,9 @@ mod tests {
         assert!(projects[0].is_expanded);
         assert_eq!(projects[0].tabs.len(), 1);
         let tab = &projects[0].tabs[0];
+        // tab_id is composed as `<projectId>:<rawTabId>` to match the
+        // desktop's makeTabKey() convention. Raw tab id in projects.json
+        // was "shell"; composed with project "control-center" gives:
         assert_eq!(tab.tab_id, "control-center:shell");
         assert_eq!(tab.label, "shell");
         assert_eq!(tab.cmd.as_deref(), Some("zsh"));
@@ -310,6 +371,26 @@ mod tests {
     fn load_from_disk_returns_none_on_missing_file() {
         let tmp = tempfile::tempdir().unwrap();
         assert!(ProjectsCache::load_from_disk(tmp.path()).is_none());
+    }
+
+    /// Pins the `tab_id` composition to `<projectId>:<rawTabId>`. Must
+    /// stay in sync with the companion-side pin in
+    /// `companion/src/screens/workspace/tab-key.shape.test.ts` and with
+    /// the desktop-side `makeTabKey` in
+    /// `src/screens/workspace/workspace.helpers.ts`. If any of the
+    /// three drifts, mobile and desktop stop sharing PTY sessions for
+    /// the "same" tab; both tests should surface the drift on the CI
+    /// side that changed.
+    #[test]
+    fn compose_tab_id_matches_desktop_makeTabKey() {
+        assert_eq!(
+            compose_tab_id("control-center", "shell-a9e7"),
+            "control-center:shell-a9e7",
+        );
+        // Edge case: colons in the raw id (shouldn't occur in practice
+        // but the composition must not smuggle its own delimiter into
+        // parseable state).
+        assert_eq!(compose_tab_id("p", "a:b"), "p:a:b");
     }
 
     #[test]

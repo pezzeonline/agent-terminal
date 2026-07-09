@@ -20,6 +20,7 @@ use crate::auth_stub::AuthStub;
 use crate::mod_engine::{CwdTable, ModEngineHandle};
 use crate::projects_cache::ProjectsCache;
 use crate::protocol::{ClientFrame, ServerFrame};
+use tauri::Emitter;
 use crate::pty_manager::{spawn_pty_if_absent, PtyMap};
 use crate::stream_hub::{StreamHub, SubscriberId};
 use axum::{
@@ -83,7 +84,57 @@ pub struct ServerState {
     /// standing up a full Tauri mock runtime; the auto-spawn branch
     /// gates on `Some` and treats `None` as "no-op, don't spawn".
     pub app_handle: Option<tauri::AppHandle>,
+    /// Per-op-id map from CRUD `(connection_id, op_id)` to the client
+    /// outbox that fired it. Populated when Rust dispatches a
+    /// `wss:mobile_op` Tauri event to React; consulted when React calls
+    /// the `report_mobile_op_ok` or `report_mobile_op_error` Tauri
+    /// command so we route the reply frame back to the exact client
+    /// that started the op.
+    ///
+    /// Compound key: `op_id` alone would collide across clients because
+    /// each mobile process starts its counter at 1. `connection_id` is
+    /// assigned by this server on WebSocket upgrade (monotonic global
+    /// counter) and threaded through every `wss:mobile_op` event, so
+    /// (connection_id, op_id) is globally unique per pending op.
+    pub mobile_op_inboxes: Arc<MobileOpInboxes>,
 }
+
+/// Reply-routing table for mobile CRUD ops. See ServerState docs.
+pub struct MobileOpInboxes(
+    pub std::sync::Mutex<HashMap<(u64, u64), mpsc::UnboundedSender<ServerFrame>>>,
+);
+
+impl MobileOpInboxes {
+    pub fn new() -> Self {
+        Self(std::sync::Mutex::new(HashMap::new()))
+    }
+}
+
+impl MobileOpInboxes {
+    /// Drop every pending entry for a connection. Called when the
+    /// per-connection task exits (client close, socket error, task
+    /// panic) so the map doesn't accumulate dead outbox senders that
+    /// never get drained by an OpOk/OpError report.
+    pub fn reap_connection(&self, connection_id: u64) {
+        self.0
+            .lock()
+            .expect("mobile_op_inboxes lock poisoned")
+            .retain(|(cid, _), _| *cid != connection_id);
+    }
+}
+
+impl Default for MobileOpInboxes {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Monotonic per-server-process connection id. Assigned in
+/// `connection_task` on each WebSocket upgrade so mobile CRUD ops from
+/// different clients can be routed back to the exact originating
+/// outbox even when their client-local `op_id` counters collide.
+static NEXT_CONNECTION_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 /// Bind the WSS server to `addr` and serve until the listener closes.
 /// `lib.rs` spawns this as a tokio task and doesn't await its
@@ -135,6 +186,8 @@ async fn handle_stream_upgrade(
 /// replies. This initial commit only handles auth + the initial Projects
 /// push. The next commit wires the full ClientFrame dispatch loop.
 async fn connection_task(mut socket: WebSocket, state: Arc<ServerState>) {
+    let connection_id = NEXT_CONNECTION_ID
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // Step 1: read the auth frame.
     let auth_frame = match read_frame(&mut socket).await {
         Ok(Some(f)) => f,
@@ -236,6 +289,7 @@ async fn connection_task(mut socket: WebSocket, state: Arc<ServerState>) {
                     &state,
                     &outbox_tx,
                     &mut subscriptions,
+                    connection_id,
                 )
                 .await;
             }
@@ -267,8 +321,11 @@ async fn connection_task(mut socket: WebSocket, state: Arc<ServerState>) {
     }
 
     // Cleanup: drop every remaining subscription so the hub reclaims
-    // its per-tab bookkeeping. Runs on any exit from the loop (client
-    // close, read error, outbox drained).
+    // its per-tab bookkeeping. Also drop any pending mobile-op inbox
+    // entries for this connection so the map doesn't leak dead sender
+    // clones. Runs on any exit from the loop (client close, read error,
+    // outbox drained).
+    state.mobile_op_inboxes.reap_connection(connection_id);
     for (tab_id, sub_id) in subscriptions {
         state.hub.unsubscribe(&tab_id, sub_id);
     }
@@ -281,6 +338,7 @@ async fn dispatch_client_frame(
     state: &Arc<ServerState>,
     outbox_tx: &mpsc::UnboundedSender<ServerFrame>,
     subscriptions: &mut HashMap<String, SubscriberId>,
+    connection_id: u64,
 ) {
     match frame {
         // The main auth path already handled the first Auth frame. A
@@ -430,6 +488,104 @@ async fn dispatch_client_frame(
         ClientFrame::Ping => {
             let _ = outbox_tx.send(ServerFrame::Pong);
         }
+
+        // -------- Phase B: mobile-driven CRUD --------
+        //
+        // Every arm follows the same shape:
+        //   1. Reject if the projects cache has not been hydrated by
+        //      React yet (cold-start window).
+        //   2. Reject if we have no AppHandle (integration test env).
+        //   3. Register this connection's outbox for the op_id BEFORE
+        //      firing the Tauri event so a fast React error report can
+        //      find us.
+        //   4. Emit `wss:mobile_op` for React to consume.
+        //
+        // Success path: React applies the mutation via a $projects
+        // store action, then reports it back through the
+        // `report_mobile_op_ok` Tauri command. That routes an
+        // `OpOk { op_id }` frame through this connection's outbox so
+        // the mobile sender's pending promise resolves. persist() also
+        // syncs the fresh tree to the cache which broadcasts a Projects
+        // frame to every connected client, so the mobile view updates
+        // in state around the same instant.
+        ClientFrame::CreateProject { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, connection_id, op_id, "create_project", &body);
+        }
+        ClientFrame::CreateTab { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, connection_id, op_id, "create_tab", &body);
+        }
+        ClientFrame::RenameProject { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, connection_id, op_id, "rename_project", &body);
+        }
+        ClientFrame::RenameTab { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, connection_id, op_id, "rename_tab", &body);
+        }
+        ClientFrame::RemoveProject { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, connection_id, op_id, "remove_project", &body);
+        }
+        ClientFrame::RemoveTab { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, connection_id, op_id, "remove_tab", &body);
+        }
+        ClientFrame::ReorderTabs { op_id, body } => {
+            dispatch_mobile_op(&state, &outbox_tx, connection_id, op_id, "reorder_tabs", &body);
+        }
+    }
+}
+
+/// Shared plumbing for the seven CRUD arms. Serialises the body,
+/// runs the hydration + app-handle checks, registers the outbox for
+/// the op_id, and emits the Tauri event React listens for.
+fn dispatch_mobile_op<T: serde::Serialize>(
+    state: &ServerState,
+    outbox_tx: &mpsc::UnboundedSender<ServerFrame>,
+    connection_id: u64,
+    op_id: u64,
+    op: &'static str,
+    body: &T,
+) {
+    if !state.projects_cache.is_hydrated() {
+        let _ = outbox_tx.send(ServerFrame::OpError {
+            op_id,
+            reason: "desktop $projects still hydrating, retry in a moment"
+                .to_string(),
+        });
+        return;
+    }
+    let Some(app) = state.app_handle.as_ref() else {
+        let _ = outbox_tx.send(ServerFrame::OpError {
+            op_id,
+            reason: "app handle unavailable (integration test env)".to_string(),
+        });
+        return;
+    };
+    // Register the outbox BEFORE emitting the event so a fast React
+    // error report can find us. Key by (connection_id, op_id) so two
+    // mobile clients each starting their op_id counter at 1 do not
+    // overwrite each other's outbox pointer.
+    state
+        .mobile_op_inboxes
+        .0
+        .lock()
+        .expect("mobile_op_inboxes lock poisoned")
+        .insert((connection_id, op_id), outbox_tx.clone());
+    let payload = serde_json::json!({
+        "op": op,
+        "connection_id": connection_id,
+        "op_id": op_id,
+        "body": body,
+    });
+    if let Err(e) = app.emit("wss:mobile_op", payload) {
+        // Emission failed: reap the inbox and bounce back an error.
+        state
+            .mobile_op_inboxes
+            .0
+            .lock()
+            .expect("mobile_op_inboxes lock poisoned")
+            .remove(&(connection_id, op_id));
+        let _ = outbox_tx.send(ServerFrame::OpError {
+            op_id,
+            reason: e.to_string(),
+        });
     }
 }
 
@@ -480,5 +636,12 @@ fn first_op_name(frame: &ClientFrame) -> &'static str {
         ClientFrame::Write { .. } => "write",
         ClientFrame::Resize { .. } => "resize",
         ClientFrame::Ping => "ping",
+        ClientFrame::CreateProject { .. } => "create_project",
+        ClientFrame::CreateTab { .. } => "create_tab",
+        ClientFrame::RenameProject { .. } => "rename_project",
+        ClientFrame::RenameTab { .. } => "rename_tab",
+        ClientFrame::RemoveProject { .. } => "remove_project",
+        ClientFrame::RemoveTab { .. } => "remove_tab",
+        ClientFrame::ReorderTabs { .. } => "reorder_tabs",
     }
 }

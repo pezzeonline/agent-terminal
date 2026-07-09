@@ -272,6 +272,13 @@ pub fn run() {
             let projects_cache_for_wss = Arc::clone(&projects_cache);
             app.manage(Arc::clone(&projects_cache));
 
+            // Per-op-id inboxes for routing OpError frames back to the
+            // mobile client that fired a CRUD op. Managed by Tauri so
+            // `report_mobile_op_error` can look up the sender.
+            let mobile_op_inboxes = Arc::new(wss_server::MobileOpInboxes::new());
+            let mobile_op_inboxes_for_wss = Arc::clone(&mobile_op_inboxes);
+            app.manage(Arc::clone(&mobile_op_inboxes));
+
             // WSS server. AuthStub reads (or auto-generates) the dev
             // config file — its bind_addr comes from there. Spawn as a
             // tokio task; bind failure logs but doesn't block startup so
@@ -294,6 +301,7 @@ pub fn run() {
                             mod_engine_handle,
                             cwd_table,
                             app_handle: Some(app.handle().clone()),
+                            mobile_op_inboxes: mobile_op_inboxes_for_wss,
                         });
                         let bind_addr = auth.bind_addr;
                         app.manage(auth);
@@ -340,6 +348,8 @@ pub fn run() {
             commands::list_projects,
             commands::save_projects,
             commands::sync_projects_to_wss,
+            commands::report_mobile_op_error,
+            commands::report_mobile_op_ok,
             notifications::notif_set_projects,
             notifications::notif_set_active_tab,
             notifications::notif_set_app_focus,
