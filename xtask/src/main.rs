@@ -63,11 +63,20 @@ fn regen_protocol() -> Result<()> {
     // expectations exactly. Without this step the drift check would flip
     // red whenever a developer's biome version formats slightly
     // differently from typeshare's output.
+    //
+    // Version pin: `bunx @biomejs/biome` without a version resolves to
+    // whatever biome is latest at run time. CI and dev machines picked
+    // up different versions that formatted this file slightly
+    // differently, tripping the CI drift check even when the wire
+    // types themselves hadn't drifted. Pin to the exact version listed
+    // in `companion/package.json` devDependencies so every runner
+    // produces byte-identical output.
     run_in(
         &root.join("companion"),
         "bunx",
         &[
-            "@biomejs/biome",
+            "--bun",
+            "@biomejs/biome@2.5.1",
             "format",
             "--write",
             output.to_str().unwrap(),
