@@ -1,2 +1,56 @@
 @import 'tailwindcss';
 @import 'uniwind';
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent-soft: var(--accent-soft);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-destructive: var(--destructive);
+  --color-success: var(--success);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: rgba(20, 22, 25, 0.9);
+  --card: var(--background);
+  --card-foreground: var(--foreground);
+  --muted: rgba(0, 0, 0, 0.03);
+  --muted-foreground: rgba(0, 0, 0, 0.55);
+  --accent: oklch(0.55 0.18 225);
+  --accent-foreground: #ffffff;
+  --accent-soft: oklch(0.55 0.18 225 / 0.1);
+  --border: rgba(0, 0, 0, 0.08);
+  --input: rgba(0, 0, 0, 0.08);
+  --destructive: #c23648;
+  --success: #2e8b3d;
+  --radius: 0.5rem;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #0e0f10;
+    --foreground: rgba(230, 232, 235, 0.92);
+    --card: var(--background);
+    --card-foreground: var(--foreground);
+    --muted: rgba(255, 255, 255, 0.04);
+    --muted-foreground: rgba(255, 255, 255, 0.55);
+    --accent: oklch(0.68 0.15 225);
+    --accent-foreground: #000000;
+    --accent-soft: oklch(0.68 0.15 225 / 0.14);
+    --border: rgba(255, 255, 255, 0.08);
+    --input: rgba(255, 255, 255, 0.08);
+    --destructive: #f7768e;
+    --success: #9ece6a;
+  }
+}

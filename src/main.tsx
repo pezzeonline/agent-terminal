@@ -9,6 +9,7 @@ import { initNavigation } from '@/modules/stores/$navigation'
 import { $projects } from '@/modules/stores/$projects'
 import { initTabRecencySubscriber } from '@/modules/stores/$tabRecency.init'
 import { initThemeFromStorage } from '@/modules/stores/$theme'
+import { installMobileOpsListener } from '@/modules/wss-bridge/mobile-ops'
 import { WorkspaceLayout } from '@/screens/workspace/WorkspaceLayout'
 import type { Project } from '@/screens/workspace/workspace.types'
 import '@xterm/xterm/css/xterm.css'
@@ -24,7 +25,18 @@ async function bootstrap() {
     if (saved.length > 0) {
       $projects.set(saved)
     }
+    // Prime the Rust WSS ProjectsCache AND flip its `hydrated` flag,
+    // even when saved is empty. Rust needs the flag flipped to accept
+    // mobile CRUD ops. If we skipped the call for an empty projects.json
+    // the first mobile CRUD would be rejected forever.
+    IPC.syncProjectsToWss(saved ?? [], true).catch(() => {})
   } catch {}
+
+  // Install the wss:mobile_op listener so any mobile client that fires a
+  // CRUD frame (create_tab, rename_project, etc.) has a receiver on the
+  // React side. Runs before ReactDOM renders so the listener is live the
+  // moment the first WSS connection auth-succeeds.
+  await installMobileOpsListener()
 
   initNavigation()
   initThemeFromStorage()

@@ -15,6 +15,16 @@ export const $projects = atom<Project[]>([])
 
 function persist(projects: Project[]): void {
   IPC.saveProjects(projects).catch(() => {})
+  // Push the fresh tree into the WSS ProjectsCache so any paired mobile
+  // client sees the change. Fire-and-forget; a stale mobile view is not
+  // a desktop-side failure. Runs alongside `saveProjects` for every
+  // mutation (add/remove/rename/reorder/pin), including the initial
+  // hydration bootstrap in the $session store.
+  // Every persist call passes hydrated=true. Bootstrap fires the first
+  // one right after listProjects() resolves in main.tsx; after that any
+  // mutation from the desktop UI (or from a mobile CRUD op via the
+  // mobile-ops listener) funnels through here and re-affirms the flag.
+  IPC.syncProjectsToWss(projects, true).catch(() => {})
 }
 
 function arrayMove<T>(arr: T[], from: number, to: number): T[] {

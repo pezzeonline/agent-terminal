@@ -1,0 +1,28 @@
+{
+  // Paths fallow should treat as reachable even without an explicit import
+  // graph edge — normally used for framework-magic dynamic loads, borrowed
+  // here for generated wire-protocol bindings that don't have a consumer
+  // yet. The WSS client sub-step introduces the first import; when that
+  // lands, this entry can go away.
+  "dynamicallyLoaded": [
+    "src/modules/wss/protocol.gen.ts",
+    // Metro's platform resolution picks TerminalDom.android.tsx on Android
+    // and TerminalDom.tsx on iOS/fallback. Fallow's import graph doesn't
+    // model the platform split, so it flags the iOS file as unreachable.
+    // Both are legitimate consumers.
+    "src/screens/tab/TerminalDom.tsx"
+  ],
+  // react-native-web is required by expo/dom's `.web.tsx` files that
+  // Metro pulls in when bundling `'use dom'` components. No source
+  // file directly imports it; the bundler wires it transparently.
+  "ignoreDependencies": ["react-native-web"],
+  "rules": {
+    // `expo` is the Expo SDK runtime. It's imported transitively by
+    // expo-router and directly by metro.config.js (build tooling). Fallow's
+    // static analysis classifies metro.config.js as non-production and
+    // doesn't follow the expo-router → expo edge, so it flags expo as
+    // "test-only". False positive for the whole Expo ecosystem — expo is
+    // the framework itself and cannot be moved to devDependencies.
+    "test-only-dependencies": "off"
+  }
+}

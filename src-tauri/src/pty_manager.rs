@@ -1,10 +1,12 @@
 use crate::mod_engine::{CwdTable, ModEngineHandle};
+use crate::projects_cache::ProjectsCache;
+use crate::stream_hub::StreamHub;
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 use tauri::ipc::Channel;
@@ -104,6 +106,16 @@ struct ReaderCtx {
     closing: Arc<AtomicBool>,
     pty_map: PtyMap,
     cwd_table: CwdTable,
+    /// Per-tab fan-out into local subscribers + sidecar shadow xterm.
+    /// Reader threads broadcast every PTY chunk through here; the local
+    /// channel above is one of its subscribers (still owned here for the
+    /// reconnect-swap mechanism try_reattach uses).
+    hub: Arc<StreamHub>,
+    /// Fired on respawn_in_place so paired WSS clients push a fresh
+    /// Projects frame reflecting the new PtyHandle's state. Optional so
+    /// spawn_pty callers that don't yet have a cache (existing tests,
+    /// pre-integration paths) can still work.
+    projects_cache: Option<Arc<ProjectsCache>>,
 }
 
 /// Spawns the reader thread that forwards PTY bytes to the frontend.
@@ -136,9 +148,10 @@ fn spawn_reader_thread(
                     decoded.clear();
                     let _ = decoder.decode_to_string(&[], &mut decoded, true);
                     if !decoded.is_empty() {
-                        if let Some(ch) = ctx.channel.lock().unwrap().as_ref() {
-                            ch.send(PtyDataPayload { data: decoded.clone() }).ok();
-                        }
+                        // Decoder tail goes to local subscribers only:
+                        // raw bytes are empty here so the ring + sidecar
+                        // see nothing (matches the pre-hub flush path).
+                        ctx.hub.broadcast(&ctx.tab_id, &[], &decoded);
                     }
 
                     // Mark dead first so try_reattach can't observe
@@ -191,25 +204,15 @@ fn spawn_reader_thread(
                     let (_result, _bytes_read, _had_errors) =
                         decoder.decode_to_string(&buf[..n], &mut decoded, false);
 
-                    let send_ok = {
-                        let guard = ctx.channel.lock().unwrap();
-                        match guard.as_ref() {
-                            Some(ch) => {
-                                ch.send(PtyDataPayload { data: decoded.clone() }).is_ok()
-                            }
-                            // No channel — WebView disconnected. Skip the
-                            // forward but still feed mods so per-tab state
-                            // stays current for reconnect.
-                            None => true,
-                        }
-                    };
+                    // Single fan-out: hub.broadcast handles the local
+                    // WebView send (including dead-channel cleanup), the
+                    // ring buffer, and the sidecar shadow write. The
+                    // PtyDataPayload-shape preservation for the WebView
+                    // path is byte-identical to the pre-hub code.
+                    ctx.hub.broadcast(&ctx.tab_id, &buf[..n], &decoded);
 
-                    if !send_ok {
-                        // Channel dropped mid-flight (WebView vanished while
-                        // we were sending). Clear the dead channel; the
-                        // process is fine, open_tab will swap in a new one.
-                        ctx.channel.lock().unwrap().take();
-                    }
+                    // Mods still see raw bytes directly — the hub is
+                    // purely a forwarder for subscribers.
                     ctx.mod_handle.on_output(&ctx.tab_id, buf[..n].to_vec());
                 }
             }
@@ -317,6 +320,8 @@ fn respawn_in_place(ctx: &ReaderCtx) -> Result<RespawnOutcome, String> {
             closing: ctx.closing.clone(),
             pty_map: ctx.pty_map.clone(),
             cwd_table: ctx.cwd_table.clone(),
+            hub: Arc::clone(&ctx.hub),
+            projects_cache: ctx.projects_cache.clone(),
         },
         new_reader,
     );
@@ -329,6 +334,13 @@ fn respawn_in_place(ctx: &ReaderCtx) -> Result<RespawnOutcome, String> {
         },
     ).ok();
 
+    // Notify WSS clients so mobile UI's TabState / project tree
+    // reflects the new PtyHandle. No-op when the cache hasn't been
+    // wired (tests, legacy callers).
+    if let Some(cache) = ctx.projects_cache.as_ref() {
+        cache.notify_spawn_change();
+    }
+
     Ok(RespawnOutcome::Respawned)
 }
 
@@ -337,6 +349,7 @@ pub fn try_reattach(
     pty_map: &PtyMap,
     mod_handle: ModEngineHandle,
     cwd_table: CwdTable,
+    hub: Arc<StreamHub>,
     tab_id: &str,
     on_data: Channel<PtyDataPayload>,
 ) -> Result<ReattachResult, String> {
@@ -394,6 +407,8 @@ pub fn try_reattach(
             closing,
             pty_map: pty_map.clone(),
             cwd_table,
+            hub,
+            projects_cache: None,
         },
         reader,
     );
@@ -466,15 +481,28 @@ fn build_shell_command(
     cmd
 }
 
+// Long signature is the trade-off for keeping spawn_pty callable from both
+// the open_tab command and the respawn / try_reattach paths without a
+// builder. A SpawnConfig struct would be cleaner but is scope creep here.
+//
+// `on_data` is `Option<Channel<PtyDataPayload>>` so mobile-first spawn (via
+// wss_server auto-spawn on Subscribe) can create a PTY with no local
+// WebView Channel. The SharedChannel starts as None; when the desktop
+// later navigates to the same tab, try_reattach swaps in the WebView's
+// Channel and future broadcasts reach both surfaces. Same "reattachable
+// local subscriber" shape the hub was designed around.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_pty(
     app: AppHandle,
     pty_map: &PtyMap,
     mod_handle: ModEngineHandle,
     cwd_table: CwdTable,
+    hub: Arc<StreamHub>,
+    projects_cache: Option<Arc<ProjectsCache>>,
     tab_id: String,
     cwd: Option<String>,
     shell: Option<String>,
-    on_data: Channel<PtyDataPayload>,
+    on_data: Option<Channel<PtyDataPayload>>,
 ) -> Result<(), String> {
     let pty_system = native_pty_system();
     let pair = pty_system
@@ -496,7 +524,11 @@ pub fn spawn_pty(
     // on_output from the same tab.
     mod_handle.on_tab_open(&tab_id, shell_pid);
 
-    let channel: SharedChannel = Arc::new(Mutex::new(Some(on_data)));
+    // Initial value is Some(channel) for desktop-first spawn, None for
+    // mobile-first spawn. The hub's Local subscriber slot below still gets
+    // wired either way; a None channel is a no-op broadcast target until
+    // try_reattach populates it.
+    let channel: SharedChannel = Arc::new(Mutex::new(on_data));
     let reader_alive = Arc::new(AtomicBool::new(true));
     let closing = Arc::new(AtomicBool::new(false));
     let respawn_history = Arc::new(Mutex::new(Vec::new()));
@@ -516,6 +548,20 @@ pub fn spawn_pty(
         },
     );
 
+    // Reset any stale hub state for this tab id before wiring the new
+    // session. spawn_pty runs when try_reattach returned NotFound or
+    // Expired — for Expired, the previous session left a TabState with
+    // its own seq counter, ring entries, and (potentially) a
+    // disconnected SharedChannel still in the subscriber list. Carrying
+    // those into the new PTY would silently leak subscribers and break
+    // remote-resume sequence math once remote subscribers exist.
+    //
+    // close_tab is a no-op for the NotFound case, so this is safe to
+    // run unconditionally.
+    hub.close_tab(&tab_id);
+    hub.ensure_tab(&tab_id, 80, 24);
+    hub.subscribe_local(&tab_id, channel.clone());
+
     spawn_reader_thread(
         ReaderCtx {
             app,
@@ -526,9 +572,75 @@ pub fn spawn_pty(
             closing,
             pty_map: pty_map.clone(),
             cwd_table,
+            hub,
+            projects_cache,
         },
         reader,
     );
 
     Ok(())
 }
+
+/// Spawn a PTY for `tab_id` only if it is not already in the map. Used
+/// by the WSS server when a mobile client subscribes to a sleeping tab
+/// (defined in projects.json but no live PtyHandle). Returns true if a
+/// new PTY was spawned, false if one was already alive.
+///
+/// The spawned PTY has no local WebView Channel; broadcasts fan out
+/// through the hub to remote subscribers only. When the desktop later
+/// navigates to the same tab, `try_reattach` populates the SharedChannel
+/// and the desktop terminal takes over rendering seamlessly.
+///
+/// Runs the same "already-alive but reader thread just died" check
+/// `try_reattach` uses so mobile-triggered spawn of an entry-in-transition
+/// doesn't race with the reader thread's exit path.
+///
+/// Concurrent-call safety: two mobile clients subscribing to the same
+/// sleeping tab at once would both pass the map check and both call
+/// `spawn_pty`, whose unconditional `pty_map.insert` overwrites the
+/// first entry — leaking the first child + reader thread. The
+/// `SPAWN_GATE` global mutex serialises the check-and-spawn window so
+/// only one caller proceeds per tab. Contention is negligible because
+/// spawn is a rare, ms-scale operation.
+#[allow(clippy::too_many_arguments)]
+pub fn spawn_pty_if_absent(
+    app: AppHandle,
+    pty_map: &PtyMap,
+    mod_handle: ModEngineHandle,
+    cwd_table: CwdTable,
+    hub: Arc<StreamHub>,
+    projects_cache: Option<Arc<ProjectsCache>>,
+    tab_id: String,
+    cwd: Option<String>,
+    shell: Option<String>,
+) -> Result<bool, String> {
+    let _spawn_gate = SPAWN_GATE.lock().expect("SPAWN_GATE poisoned");
+    {
+        let map = pty_map.lock().expect("pty_map lock poisoned");
+        if let Some(handle) = map.get(&tab_id) {
+            if handle.reader_alive.load(Ordering::Acquire) {
+                return Ok(false);
+            }
+        }
+    }
+    spawn_pty(
+        app,
+        pty_map,
+        mod_handle,
+        cwd_table,
+        hub,
+        projects_cache,
+        tab_id,
+        cwd,
+        shell,
+        None,
+    )?;
+    Ok(true)
+}
+
+/// Serialises concurrent `spawn_pty_if_absent` calls so two mobile
+/// clients subscribing to the same sleeping tab_id at once cannot both
+/// pass the pty_map check and both spawn. Global rather than per-tab
+/// because auto-spawn is rare and the whole operation is ms-scale; the
+/// simplicity of one Mutex beats the storage of a per-tab HashMap.
+static SPAWN_GATE: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));

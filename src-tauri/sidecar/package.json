@@ -1,0 +1,18 @@
+{
+  "name": "agent-terminal-sidecar",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Headless xterm host that the agent-terminal Rust process talks to over stdio JSON-RPC. One Node process per app, N headless terminals inside.",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@xterm/headless": "^5.5.0",
+    "@xterm/addon-serialize": "^0.13.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

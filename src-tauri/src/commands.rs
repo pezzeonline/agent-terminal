@@ -1,16 +1,26 @@
 use crate::mod_engine::ModEngine;
+use crate::projects_cache::{ProjectsCache, StoredProject};
+use crate::protocol::ServerFrame;
+use crate::wss_server::MobileOpInboxes;
 use crate::pty_manager::{spawn_pty, try_reattach, PtyDataPayload, PtyMap, ReattachResult};
+use crate::stream_hub::StreamHub;
 use portable_pty::PtySize;
 use std::io::Write;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use tauri::{AppHandle, Emitter, State};
 use tauri::ipc::Channel;
 
+// Tauri commands take their managed state + frontend args by position.
+// Bundling into a struct would lose the ergonomic state injection.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn open_tab(
     app: AppHandle,
     pty_map: State<'_, PtyMap>,
     mod_engine: State<'_, ModEngine>,
+    hub: State<'_, Arc<StreamHub>>,
+    projects_cache: State<'_, Arc<ProjectsCache>>,
     tab_id: String,
     cwd: Option<String>,
     shell: Option<String>,
@@ -37,6 +47,7 @@ pub async fn open_tab(
         &pty_map,
         mod_engine.handle(),
         mod_engine.cwd_table(),
+        Arc::clone(&hub),
         &tab_id,
         on_data.clone(),
     ) {
@@ -59,11 +70,16 @@ pub async fn open_tab(
         &pty_map,
         mod_engine.handle(),
         mod_engine.cwd_table(),
+        Arc::clone(&hub),
+        Some(Arc::clone(&projects_cache)),
         tab_id,
         cwd,
         shell,
-        on_data,
+        Some(on_data),
     )?;
+    // Notify any WSS subscribers that the tab inventory changed so
+    // they push a fresh Projects frame to their mobile clients.
+    projects_cache.notify_spawn_change();
     Ok(true)
 }
 
@@ -91,6 +107,7 @@ pub async fn write_pty(
 pub async fn resize_pty(
     pty_map: State<'_, PtyMap>,
     mod_engine: State<'_, ModEngine>,
+    hub: State<'_, Arc<StreamHub>>,
     tab_id: String,
     cols: u16,
     rows: u16,
@@ -107,12 +124,17 @@ pub async fn resize_pty(
         }
     } // Lock released before dispatching to MOD engine.
     mod_engine.handle().on_resize(&tab_id, cols, rows);
+    // Keep the sidecar's shadow xterm in sync so its future serialize
+    // payload reflects the right viewport dimensions. Fire-and-forget.
+    hub.resize_tab(&tab_id, cols, rows);
     Ok(())
 }
 
 #[tauri::command]
 pub async fn close_tab(
     pty_map: State<'_, PtyMap>,
+    hub: State<'_, Arc<StreamHub>>,
+    projects_cache: State<'_, Arc<ProjectsCache>>,
     tab_id: String,
 ) -> Result<(), String> {
     // The reader thread reads `closing` on EOF to decide between emitting
@@ -122,11 +144,19 @@ pub async fn close_tab(
     // reader reads `closing`, either we've already set it (and the entry
     // is gone — exit path) or we haven't yet (entry still present —
     // respawn path).
-    let mut map = pty_map.lock().unwrap();
-    if let Some(handle) = map.get(&tab_id) {
-        handle.closing.store(true, Ordering::Release);
+    {
+        let mut map = pty_map.lock().unwrap();
+        if let Some(handle) = map.get(&tab_id) {
+            handle.closing.store(true, Ordering::Release);
+        }
+        map.remove(&tab_id);
     }
-    map.remove(&tab_id);
+    // Drop hub state + tell the sidecar to dispose its shadow xterm.
+    // Done after the PtyMap mutation so the reader thread's `closing`
+    // check sees the same ordering it always did. Fire-and-forget.
+    hub.close_tab(&tab_id);
+    // Notify WSS subscribers so mobile clients see the tab disappear.
+    projects_cache.notify_spawn_change();
     Ok(())
 }
 
@@ -137,6 +167,86 @@ pub async fn save_projects(projects: serde_json::Value) -> Result<(), String> {
     tokio::fs::create_dir_all(&parent).await.map_err(|e| e.to_string())?;
     let json = serde_json::to_string_pretty(&projects).map_err(|e| e.to_string())?;
     tokio::fs::write(&path, json).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Push the desktop React `$projects` nano-store into the WSS
+/// ProjectsCache. React subscribes to `$projects` and invokes this on
+/// every change (including hydration on app boot). The cache broadcasts
+/// to every connected mobile client, so a phone that is already paired
+/// sees create / rename / delete / reorder actions from the desktop
+/// within a network round trip.
+///
+/// `projects` arrives in the frontend camelCase shape (matches Tab and
+/// Project TS types). We reuse the same StoredProject / StoredTab
+/// deserialisation the disk fallback uses, then map to the snake_case
+/// wire ProjectSummary via `Into`.
+#[tauri::command]
+pub async fn sync_projects_to_wss(
+    projects_cache: State<'_, Arc<ProjectsCache>>,
+    projects: Vec<StoredProject>,
+    hydrated: bool,
+) -> Result<(), String> {
+    projects_cache.set(projects.into_iter().map(Into::into).collect());
+    // Phase B: React's first sync sets `hydrated: true` from
+    // main.tsx::bootstrap after listProjects() resolves. Subsequent
+    // per-mutation calls also carry `hydrated: true` (idempotent). WSS
+    // CRUD dispatch gates on this flag so mobile ops arriving during
+    // the cold-start window get a clean OpError instead of vanishing
+    // into an unlistened Tauri event bus.
+    if hydrated {
+        projects_cache.set_hydrated();
+    }
+    Ok(())
+}
+
+/// React reports a mobile CRUD op failure back to the WSS server. The
+/// server looks up the outbox we registered when the CRUD frame first
+/// arrived and routes an `OpError` frame to that connection.
+///
+/// `connection_id + op_id` compound key: `op_id` alone would collide
+/// across mobile clients since each client's counter starts at 1.
+/// Rust assigns `connection_id` on WebSocket upgrade and threads it
+/// through the `wss:mobile_op` payload; React echoes it back here so
+/// we route to the exact originating outbox.
+#[tauri::command]
+pub async fn report_mobile_op_error(
+    inboxes: State<'_, Arc<MobileOpInboxes>>,
+    connection_id: u64,
+    op_id: u64,
+    reason: String,
+) -> Result<(), String> {
+    if let Some(tx) = inboxes
+        .0
+        .lock()
+        .expect("mobile_op_inboxes lock poisoned")
+        .remove(&(connection_id, op_id))
+    {
+        let _ = tx.send(ServerFrame::OpError { op_id, reason });
+    }
+    Ok(())
+}
+
+/// React reports a mobile CRUD op succeeded. Routes an OpOk frame back
+/// to the originating client so its pending promise resolves. Without
+/// this, the sender's Promise waits indefinitely until it times out,
+/// even though the mutation applied cleanly. See
+/// `report_mobile_op_error` for the connection_id + op_id keying
+/// rationale.
+#[tauri::command]
+pub async fn report_mobile_op_ok(
+    inboxes: State<'_, Arc<MobileOpInboxes>>,
+    connection_id: u64,
+    op_id: u64,
+) -> Result<(), String> {
+    if let Some(tx) = inboxes
+        .0
+        .lock()
+        .expect("mobile_op_inboxes lock poisoned")
+        .remove(&(connection_id, op_id))
+    {
+        let _ = tx.send(ServerFrame::OpOk { op_id });
+    }
     Ok(())
 }
 
