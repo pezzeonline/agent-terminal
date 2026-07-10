@@ -133,6 +133,9 @@ jobs:
           if ! git diff --quiet companion/src/modules/wss/protocol.gen.ts; then
             echo "::error::companion/src/modules/wss/protocol.gen.ts is out of sync with src-tauri/src/protocol.rs."
             echo "::error::Run 'cargo xtask regen-protocol' locally and commit the result."
+            echo "::group::Actual drift (from committed to CI-regenerated)"
+            git --no-pager diff companion/src/modules/wss/protocol.gen.ts
+            echo "::endgroup::"
             exit 1
           fi
 
