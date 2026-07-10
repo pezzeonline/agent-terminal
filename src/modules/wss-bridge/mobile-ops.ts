@@ -107,9 +107,7 @@ export async function installMobileOpsListener(): Promise<void> {
       // pairing doesn't cross-wire outbox routing.
       IPC.reportMobileOpOk(connection_id, op_id).catch(() => {})
     } catch (err) {
-      IPC.reportMobileOpError(connection_id, op_id, String(err)).catch(
-        () => {},
-      )
+      IPC.reportMobileOpError(connection_id, op_id, String(err)).catch(() => {})
     }
   })
 }
