@@ -175,6 +175,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri -> target
+          # Cache third-party crate compiled outputs, not just their
+          # sources. Without this, Tauri + wry + portable-pty et al get
+          # recompiled from source every run, dominating the ~1m46s
+          # cargo check. Cache balloons from ~142 MB to ~1 GB (well
+          # under GitHub's 10 GB per-repo cap) but cargo check drops to
+          # ~10-20s on hit.
+          cache-all-crates: true
 
       - name: cargo check
         if: ${{ !cancelled() }}
