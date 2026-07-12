@@ -161,7 +161,7 @@ bun run tauri:build   # produces a .dmg under src-tauri/target/release/bundle/
 
 The build is **unsigned**, so on first launch macOS Gatekeeper will warn you — right-click the app and choose **Open** to run it. For a signed + notarized build, use the [upstream releases](https://github.com/DaniAkash/agent-terminal/releases/latest).
 
-For a live dev instance, `bun run tauri:dev`. See [CONTRIBUTING.md](./CONTRIBUTING.md) for full setup details.
+For a live dev instance, `bun run tauri:dev`. See [CONTRIBUTING.md](./CONTRIBUTING.md) for full setup details, and [docs/RELEASING.md](./docs/RELEASING.md) for signing keys, Apple credentials, and cutting a signed release.
 
 ---
 
