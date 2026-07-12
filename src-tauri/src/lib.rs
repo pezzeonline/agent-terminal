@@ -145,7 +145,7 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init());
 
     // Self-update — only the prod-namespaced build registers the plugin.
-    // The dev bundle id (com.daniakash.agent-terminal-dev) cannot be the
+    // The dev bundle id (com.irregulab.agent-terminal-dev) cannot be the
     // legitimate target of a manifest signed for the prod app, so
     // dev-instance builds skip the plugin entirely rather than risk an
     // update attempt that overlays a foreign bundle. process plugin is
