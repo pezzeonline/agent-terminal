@@ -8,7 +8,7 @@ import { TabSwitcher } from '@/components/TabSwitcher/TabSwitcher'
 import { TerminalSearchBar } from '@/components/TerminalSearchBar/TerminalSearchBar'
 import { UpdateBanner } from '@/components/UpdateBanner/UpdateBanner'
 import { formatDropPayload } from '@/modules/dragDrop/dropPayload'
-import { Keys, Mod } from '@/modules/keymap/keys'
+import { Keys, Mod, ProducedChars } from '@/modules/keymap/keys'
 import { $activeSearch, openSearch } from '@/modules/stores/$activeSearch'
 import { getActiveTerminalHandle } from '@/modules/stores/$activeTerminal'
 import { popClosedTab } from '@/modules/stores/$closedTabs'
@@ -187,18 +187,31 @@ export function WorkspaceLayout() {
     hotkeyOpts,
   )
 
-  // ⌘= / ⌘+ — increase font size. Bound twice: bare `Equal` for ⌘= and
-  // shifted `Equal` for ⌘+ (which is Shift+= on US keyboards). Both
-  // presses use the same physical key (event.code "Equal") and only
-  // differ by the shift modifier.
+  // ⌘= / ⌘+ — increase font size. Matched by produced character
+  // (`useKey`), not physical code — on US keyboards '+' is Shift+Equal,
+  // but on many non-US layouts (e.g. Italian) '+' is its own unshifted
+  // key entirely. Binding all four character/shift combinations covers
+  // both cases regardless of where they physically sit. See
+  // `ProducedChars` in modules/keymap/keys.ts for the rationale.
+  const fontSizeHotkeyOpts = { ...hotkeyOpts, useKey: true, splitKey: '.' }
   useHotkeys(
-    [`${Mod.Meta}+${Keys.Equal}`, `${Mod.Meta}+${Mod.Shift}+${Keys.Equal}`],
+    [
+      `${Mod.Meta}.${ProducedChars.Equal}`,
+      `${Mod.Meta}.${Mod.Shift}.${ProducedChars.Equal}`,
+      `${Mod.Meta}.${ProducedChars.Plus}`,
+      `${Mod.Meta}.${Mod.Shift}.${ProducedChars.Plus}`,
+    ],
     () => increaseFontSize(),
-    hotkeyOpts,
+    fontSizeHotkeyOpts,
   )
-  // ⌘- — decrease font size
-  useHotkeys(`${Mod.Meta}+${Keys.Minus}`, () => decreaseFontSize(), hotkeyOpts)
-  // ⌘0 — reset font size to default
+  // ⌘- — decrease font size (produced-character match, see above)
+  useHotkeys(
+    `${Mod.Meta}.${ProducedChars.Minus}`,
+    () => decreaseFontSize(),
+    fontSizeHotkeyOpts,
+  )
+  // ⌘0 — reset font size to default. Digit codes are consistent across
+  // layouts, so physical-code matching is fine here.
   useHotkeys(`${Mod.Meta}+${Keys.Digit0}`, () => resetFontSize(), hotkeyOpts)
 
   // ⌘K — clear screen + scrollback in the active terminal
