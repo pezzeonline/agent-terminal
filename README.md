@@ -5,16 +5,27 @@
 
   **A terminal workspace built around AI coding agents.**
 
-  [![Latest release](https://img.shields.io/github/v/release/DaniAkash/agent-terminal?include_prereleases&label=latest&color=blue)](https://github.com/DaniAkash/agent-terminal/releases)
   [![Status](https://img.shields.io/badge/status-pre--alpha-orange)](#status)
-  [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)](https://github.com/DaniAkash/agent-terminal/releases)
+  [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)](#tested-on)
+  [![Upstream](https://img.shields.io/badge/fork_of-DaniAkash%2Fagent--terminal-blue?logo=github)](https://github.com/DaniAkash/agent-terminal)
 </div>
 
+> [!NOTE]
+> **This is a community fork** of [**DaniAkash/agent-terminal**](https://github.com/DaniAkash/agent-terminal),
+> maintained by [Alessandro Benedetti](https://github.com/pezzeonline). It tracks upstream and adds a
+> few features (see [Fork additions](#fork-additions)) while those changes make their way back into the
+> original project. All credit for the original work goes to [Dani Akash](https://github.com/DaniAkash).
+> For the canonical project and signed release downloads, see the [upstream repository](https://github.com/DaniAkash/agent-terminal).
+
 <p align="center">
-  <a href="https://github.com/DaniAkash/agent-terminal/releases/latest/download/agent-terminal-aarch64.dmg"><img src="https://img.shields.io/badge/Download_for-Apple%20Silicon-000?style=for-the-badge&logo=apple&logoColor=white" alt="Download for Apple Silicon"></a>
+  <a href="https://github.com/DaniAkash/agent-terminal/releases/latest"><img src="https://img.shields.io/badge/Signed_downloads-Upstream%20releases-000?style=for-the-badge&logo=apple&logoColor=white" alt="Signed downloads from upstream"></a>
   &nbsp;
-  <a href="https://github.com/DaniAkash/agent-terminal/releases/latest/download/agent-terminal-x64.dmg"><img src="https://img.shields.io/badge/Download_for-Intel-0071C5?style=for-the-badge&logo=intel&logoColor=white" alt="Download for Intel"></a>
+  <a href="#build-from-source"><img src="https://img.shields.io/badge/This_fork-Build%20from%20source-0071C5?style=for-the-badge&logo=rust&logoColor=white" alt="Build this fork from source"></a>
 </p>
+
+<p align="center"><sub>This fork does not yet publish pre-built binaries. Grab a signed build of the original from
+<a href="https://github.com/DaniAkash/agent-terminal/releases/latest">upstream releases</a>, or
+<a href="#build-from-source">build this fork from source</a> to get the fork-only features.</sub></p>
 
 <p align="center">
   <a href="https://www.producthunt.com/products/agent-terminal?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-agent-terminal" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1136595&theme=light&t=1777623264721" alt="Agent terminal - One terminal. Every agent. Total clarity. | Product Hunt" width="250" height="54" /></a>
@@ -25,6 +36,18 @@
 ## Status
 
 > 🧪 **Pre-alpha.** Heavily tested on **macOS + Zsh** — that's the daily-driver setup. Other shells and platforms may work but aren't part of the test matrix yet. Things will change without warning.
+
+---
+
+## Fork additions
+
+This fork adds the following on top of upstream. Both are also proposed back to the original project as pull requests:
+
+### ⚙️ Settings window
+A tabbed **Settings** window with a **Font** tab — choose the terminal's **font family** and **font size** from a proper UI instead of editing config. Your choice is persisted and applied live to the active terminal.
+
+### ⌨️ Font-zoom fix for non-US keyboards
+The `Cmd +` / `Cmd -` / `Cmd =` zoom shortcuts previously matched the **physical key position**, so they didn't fire on many non-US keyboard layouts (where `=`/`-`/`+` sit elsewhere). Zoom is now matched by the **produced character**, so it works regardless of layout.
 
 ## Why this exists
 
@@ -120,11 +143,30 @@ Coming next:
 
 ---
 
+## Build from source
+
+This fork ships no pre-built binaries yet, so build it yourself:
+
+```bash
+git clone https://github.com/pezzeonline/agent-terminal.git
+cd agent-terminal
+bun install
+bun run tauri:build   # produces a .dmg under src-tauri/target/release/bundle/
+```
+
+The build is **unsigned**, so on first launch macOS Gatekeeper will warn you — right-click the app and choose **Open** to run it. For a signed + notarized build, use the [upstream releases](https://github.com/DaniAkash/agent-terminal/releases/latest).
+
+For a live dev instance, `bun run tauri:dev`. See [CONTRIBUTING.md](./CONTRIBUTING.md) for full setup details.
+
+---
+
 ## Contributing
 
 For development setup, project structure, code conventions, and the MOD-system guide for adding new agents:
 
 → **[CONTRIBUTING.md](./CONTRIBUTING.md)**
+
+This is a fork — for changes you want in the canonical project, please also consider opening a PR against [upstream](https://github.com/DaniAkash/agent-terminal). Issues specific to this fork's additions go to [pezzeonline/agent-terminal/issues](https://github.com/pezzeonline/agent-terminal/issues).
 
 ---
 
@@ -132,4 +174,4 @@ For development setup, project structure, code conventions, and the MOD-system g
 
 MIT — see [LICENSE](./LICENSE).
 
-Copyright © 2026 [Dani Akash](https://github.com/DaniAkash). If you build on this project, please retain the copyright notice as required by the MIT License.
+Copyright © 2026 [Dani Akash](https://github.com/DaniAkash) (original work) and © 2026 [Alessandro Benedetti](https://github.com/pezzeonline) (fork contributions). This fork retains the original copyright notice as required by the MIT License; if you build on it, please do the same.
