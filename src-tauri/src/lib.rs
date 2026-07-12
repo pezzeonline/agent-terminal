@@ -7,9 +7,36 @@ pub mod hook_server;
 // `pub` so integration tests can read NAMESPACE/HOOK_PORT.
 pub mod identity;
 mod mod_engine;
+// Narrow re-export for integration tests that need to build a
+// ModEngineHandle::noop() or read the CwdTable type. Keeps the rest of
+// the mod_engine tree private (clippy has opinions on those internal
+// mod-specific types).
+#[doc(hidden)]
+pub use mod_engine::{CwdTable, ModEngineHandle};
 mod notifications;
-mod pty_manager;
+// pub so integration tests can construct a bare PtyMap without a full
+// PtyHandle harness (tests only need the map's shape for ServerState).
+pub mod pty_manager;
 mod shell_integration;
+// pub so integration tests can drive a SidecarClient instance directly
+// without going through the full Tauri startup path.
+pub mod sidecar_client;
+// pub for the same reason — tests construct StreamHub directly.
+pub mod stream_hub;
+// pub so the WSS server (next sub-step) and future integration tests can
+// build wire frames from these types directly. Also exported at the crate
+// root so `cargo xtask regen-protocol` (which shells out to typeshare)
+// can find the #[typeshare]-annotated types by scanning src-tauri/src/.
+pub mod protocol;
+// pub for direct test coverage (config file round-trip, constant-time
+// compare, error paths).
+pub mod auth_stub;
+// pub for direct test coverage. The WSS server (next commit) constructs
+// one at startup and hands it to per-connection tasks.
+pub mod projects_cache;
+// pub so integration tests can drive the server directly (spin up on
+// 127.0.0.1:0 with an in-process client).
+pub mod wss_server;
 
 use hook_config::ensure_hooks_installed;
 use hook_server::start_hook_server;
@@ -34,9 +61,67 @@ use tauri::Emitter;
 use tauri::menu::{MenuBuilder, SubmenuBuilder};
 #[cfg(target_os = "macos")]
 use tauri::menu::MenuItemBuilder;
+use auth_stub::AuthStub;
+use projects_cache::ProjectsCache;
 use pty_manager::PtyMap;
+use sidecar_client::SidecarClient;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use stream_hub::StreamHub;
+use tokio::process::Command;
+use wss_server::ServerState;
+
+/// Locate the runtime binary + sidecar entry script. Dev launches read from
+/// the source tree via CARGO_MANIFEST_DIR; production bundling is a separate
+/// follow-up (Tauri externalBin + a bundled Node binary). Returns None when
+/// either piece is missing so startup degrades to "no sidecar" gracefully.
+fn resolve_sidecar_paths() -> Option<(PathBuf, PathBuf)> {
+    // Prefer node; fall back to bun (compatible enough for the JSON-RPC loop
+    // + @xterm/headless). Whichever is present on PATH wins.
+    let runtime = which::which("node")
+        .or_else(|_| which::which("bun"))
+        .ok()?;
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let script = PathBuf::from(manifest_dir).join("sidecar").join("index.js");
+    if !script.exists() {
+        return None;
+    }
+    Some((runtime, script))
+}
+
+/// Spawn the headless-xterm sidecar. Returns None on any failure (missing
+/// runtime, missing script, spawn error). The desktop continues running
+/// without it; the sidecar is only consumed by the upcoming StreamHub +
+/// WSS server modules.
+async fn try_spawn_sidecar() -> Option<SidecarClient> {
+    let (runtime, script) = match resolve_sidecar_paths() {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "[sidecar] disabled: node/bun not on PATH or sidecar/index.js missing — \
+                 remote-attach features will be unavailable until the sidecar is bundled"
+            );
+            return None;
+        }
+    };
+    let mut cmd = Command::new(&runtime);
+    cmd.arg(&script);
+    match SidecarClient::spawn(cmd).await {
+        Ok(c) => {
+            eprintln!(
+                "[sidecar] spawned via {} {}",
+                runtime.display(),
+                script.display()
+            );
+            Some(c)
+        }
+        Err(e) => {
+            eprintln!("[sidecar] spawn failed: {e}");
+            None
+        }
+    }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -71,8 +156,12 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init());
 
+    // Cheap Arc clones the setup closure needs before the outer scope
+    // hands ownership to `.manage(pty_map)` at the end of the builder.
+    let pty_map_for_setup = Arc::clone(&pty_map);
+
     builder
-        .setup(|app| {
+        .setup(move |app| {
             // Custom macOS menu — omits the default items whose shortcuts
             // conflict with our keyboard handlers:
             //   View → Actual Size / Zoom In / Zoom Out  (⌘0 / ⌘+ / ⌘-)
@@ -139,7 +228,101 @@ pub fn run() {
             start_hook_server(hook_tx);
 
             let mod_engine = engine_builder.build(app.handle().clone());
+            // Take handles the WSS server needs BEFORE we hand mod_engine
+            // over to Tauri's managed-state store — after `app.manage`
+            // moves it, direct access goes away.
+            let mod_engine_handle = mod_engine.handle();
+            let cwd_table = mod_engine.cwd_table();
             app.manage(mod_engine);
+
+            // Headless-xterm sidecar. Spawned as best-effort so a missing
+            // node/bun runtime or a not-yet-bundled script never blocks the
+            // desktop from launching. The StreamHub built below uses
+            // Option<Arc<SidecarClient>> so it degrades to local-only fan-
+            // out when the sidecar isn't available.
+            let sidecar = tauri::async_runtime::block_on(try_spawn_sidecar()).map(Arc::new);
+            if let Some(client) = sidecar.clone() {
+                app.manage(client);
+            }
+
+            // Per-tab fan-out hub. Always present so pty_manager's reader
+            // threads have a stable broadcast target; the sidecar passed in
+            // is the optional bit. State<'_, Arc<StreamHub>> is the handle
+            // Tauri commands grab.
+            let hub = StreamHub::new(sidecar);
+            let hub_for_wss = Arc::clone(&hub);
+            app.manage(hub);
+
+            // Projects cache: replaces the pre-Phase-A ProjectRegistry.
+            // React's `$projects` nano-store owns mutations and pushes the
+            // full projects vector to the cache via the
+            // `sync_projects_to_wss` Tauri command on every change. The
+            // WSS server subscribes to the cache's change watch and pushes
+            // a fresh Projects frame to every connected mobile client.
+            //
+            // Cold-start fallback: load projects.json directly from disk
+            // so the ~200 ms window between backend init and React first-
+            // paint does not serve an empty tree to any mobile client
+            // that happens to be reconnecting at just that moment.
+            let projects_cache = Arc::new(ProjectsCache::new());
+            let config_dir_for_cache = dirs::home_dir()
+                .map(|h| h.join(".config").join(identity::NAMESPACE));
+            if let Some(dir) = &config_dir_for_cache {
+                if let Some(initial) = ProjectsCache::load_from_disk(dir) {
+                    projects_cache.set(initial);
+                }
+            }
+            let projects_cache_for_wss = Arc::clone(&projects_cache);
+            app.manage(Arc::clone(&projects_cache));
+
+            // Per-op-id inboxes for routing OpError frames back to the
+            // mobile client that fired a CRUD op. Managed by Tauri so
+            // `report_mobile_op_error` can look up the sender.
+            let mobile_op_inboxes = Arc::new(wss_server::MobileOpInboxes::new());
+            let mobile_op_inboxes_for_wss = Arc::clone(&mobile_op_inboxes);
+            app.manage(Arc::clone(&mobile_op_inboxes));
+
+            // WSS server. AuthStub reads (or auto-generates) the dev
+            // config file — its bind_addr comes from there. Spawn as a
+            // tokio task; bind failure logs but doesn't block startup so
+            // a broken WSS never keeps the desktop from launching.
+            let config_dir = dirs::home_dir()
+                .map(|h| h.join(".config").join(identity::NAMESPACE));
+            if let Some(dir) = config_dir {
+                match AuthStub::load_or_init(&dir) {
+                    Ok((auth, path)) => {
+                        let auth = Arc::new(auth);
+                        eprintln!(
+                            "[wss] dev config: {} (token inside — copy into companion client)",
+                            path.display()
+                        );
+                        let server_state = Arc::new(ServerState {
+                            hub: hub_for_wss,
+                            auth: Arc::clone(&auth),
+                            projects_cache: projects_cache_for_wss,
+                            pty_map: Arc::clone(&pty_map_for_setup),
+                            mod_engine_handle,
+                            cwd_table,
+                            app_handle: Some(app.handle().clone()),
+                            mobile_op_inboxes: mobile_op_inboxes_for_wss,
+                        });
+                        let bind_addr = auth.bind_addr;
+                        app.manage(auth);
+                        tauri::async_runtime::spawn(async move {
+                            if let Err(e) =
+                                wss_server::run(bind_addr, server_state).await
+                            {
+                                eprintln!("[wss] server crashed: {e}");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("[wss] disabled: dev config load failed: {e}");
+                    }
+                }
+            } else {
+                eprintln!("[wss] disabled: no home directory");
+            }
 
             // Window focus → suppression signal only.
             // (The previous focus-event-based click heuristic is gone — it
@@ -167,6 +350,9 @@ pub fn run() {
             commands::close_tab,
             commands::list_projects,
             commands::save_projects,
+            commands::sync_projects_to_wss,
+            commands::report_mobile_op_error,
+            commands::report_mobile_op_ok,
             notifications::notif_set_projects,
             notifications::notif_set_active_tab,
             notifications::notif_set_app_focus,

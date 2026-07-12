@@ -53,6 +53,18 @@ pub struct ModEngineHandle {
 }
 
 impl ModEngineHandle {
+    /// Test-only constructor. Every method drops its message on the
+    /// floor (the receivers are dropped immediately) so callers can
+    /// exercise code paths that need a `ModEngineHandle` field without
+    /// standing up a full mod engine. Not for production code —
+    /// `#[doc(hidden)]` keeps it out of the rustdoc surface.
+    #[doc(hidden)]
+    pub fn noop() -> Self {
+        let (tx, _rx) = mpsc::channel(1);
+        let (lifecycle_tx, _lifecycle_rx) = mpsc::unbounded_channel();
+        Self { tx, lifecycle_tx }
+    }
+
     pub fn on_tab_open(&self, tab_id: &str, shell_pid: u32) {
         let _ = self.lifecycle_tx.send(ModMessage::Open { tab_id: tab_id.to_string(), shell_pid });
     }

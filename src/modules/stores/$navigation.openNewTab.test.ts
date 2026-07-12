@@ -9,6 +9,9 @@ mock.module('@/modules/ipc/commands', () => ({
     writePty: mock(() => Promise.resolve()),
     resizePty: mock(() => Promise.resolve()),
     listProjects: mock(() => Promise.resolve([])),
+    syncProjectsToWss: mock(() => Promise.resolve()),
+    reportMobileOpError: mock(() => Promise.resolve()),
+    reportMobileOpOk: mock(() => Promise.resolve()),
   },
 }))
 

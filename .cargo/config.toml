@@ -1,0 +1,8 @@
+# Ergonomic alias so `cargo xtask <subcommand>` works from any directory in
+# the workspace. Expands to `cargo run --package xtask -- <subcommand>`.
+#
+# The convention comes from the wider Rust community — rust-analyzer,
+# ripgrep, deno, and most large Rust projects use this exact pattern for
+# project-level scripts (codegen, deploy hooks, release automation, etc.).
+[alias]
+xtask = "run --package xtask --"
