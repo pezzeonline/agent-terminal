@@ -1,7 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::mod_engine::{AsyncAgentSignaler, Mod, ModContext};
 use tokio::sync::watch;
+
+/// Executable basenames that identify a supported coding agent. Matched against
+/// each process's `comm` basename (lowercased) anywhere in the shell's subtree.
+const AGENT_PROCESS_NAMES: &[&str] = &["claude", "codex"];
 
 struct InspectorTabState {
     cwd_tx: watch::Sender<Option<String>>,
@@ -72,7 +76,11 @@ impl Mod for ShellProcessMod {
                 // Skip agent diffing until the CWD is known — avoids emitting
                 // agent_detected with an empty CWD string on the first scan tick.
                 if let Some(ref cwd) = cwd {
-                    diff_agent_pids(&processes, &mut prev_pids, cwd, &signaler);
+                    // Scan the whole subtree, not just `processes` (direct children),
+                    // so agents launched behind a wrapper (e.g. `headroom wrap claude`,
+                    // `npx claude`) are still detected when they run as a grandchild.
+                    let agents = find_agent_processes(shell_pid).await;
+                    diff_agent_pids(&agents, &mut prev_pids, cwd, &signaler);
                 }
             }
         });
@@ -94,20 +102,17 @@ impl Mod for ShellProcessMod {
 }
 
 fn diff_agent_pids(
-    processes: &[serde_json::Value],
+    agents: &[(String, u32, String)],
     prev_pids: &mut HashMap<String, u32>,
     cwd: &str,
     signaler: &AsyncAgentSignaler,
 ) {
+    // `agents` is ordered shallowest-first (closest to the shell). When the same
+    // agent appears more than once in the subtree, `or_insert` keeps that first,
+    // shallowest instance as the canonical one for the tab.
     let mut current_pids: HashMap<String, (u32, String)> = HashMap::new();
-    for proc in processes {
-        let name = proc.get("name").and_then(|n| n.as_str()).unwrap_or("");
-        if name == "claude" || name == "codex" {
-            if let Some(pid) = proc.get("pid").and_then(|p| p.as_u64()) {
-                let cmd = proc.get("command").and_then(|c| c.as_str()).unwrap_or("").to_string();
-                current_pids.insert(name.to_string(), (pid as u32, cmd));
-            }
-        }
+    for (name, pid, cmd) in agents {
+        current_pids.entry(name.clone()).or_insert((*pid, cmd.clone()));
     }
 
     for (agent, prev_pid) in prev_pids.iter() {
@@ -126,6 +131,114 @@ fn diff_agent_pids(
     }
 
     *prev_pids = current_pids.into_iter().map(|(k, (pid, _))| (k, pid)).collect();
+}
+
+/// Detect coding-agent processes (`claude`, `codex`) anywhere in the process
+/// subtree rooted at `shell_pid`, not just among the shell's direct children.
+///
+/// Wrappers keep the real agent one or more levels below the shell — e.g.
+/// `headroom wrap claude` runs as `shell → python(headroom) → claude`, so a
+/// direct-children scan never sees it and the agent badge never lights up.
+/// Matching by `comm` basename across the whole subtree recognises the agent
+/// regardless of what launched it (headroom, `npx`, version shims, …).
+///
+/// Returns `(agent_name, pid, cmd)` shallowest-first, with the full command
+/// line resolved for each match.
+async fn find_agent_processes(shell_pid: u32) -> Vec<(String, u32, String)> {
+    if shell_pid == 0 {
+        return Vec::new();
+    }
+
+    let output = tokio::time::timeout(
+        tokio::time::Duration::from_secs(2),
+        tokio::process::Command::new("ps")
+            .args(["-ax", "-o", "pid=,ppid=,comm="])
+            .output(),
+    )
+    .await
+    .ok()
+    .and_then(|r| r.ok());
+
+    let Some(output) = output else { return Vec::new() };
+    let text = String::from_utf8_lossy(&output.stdout);
+
+    let mut procs: Vec<(u32, u32, String)> = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(pid), Some(ppid)) = (
+            parts.next().and_then(|s| s.parse::<u32>().ok()),
+            parts.next().and_then(|s| s.parse::<u32>().ok()),
+        ) else {
+            continue;
+        };
+        // Rejoin the remainder as `comm` (the executable path). Exec paths don't
+        // contain runs of whitespace, so a single-space join is lossless here.
+        let comm = parts.collect::<Vec<_>>().join(" ");
+        if comm.is_empty() {
+            continue;
+        }
+        procs.push((pid, ppid, comm));
+    }
+
+    let candidates = agent_candidates_from_tree(&procs, shell_pid, AGENT_PROCESS_NAMES);
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let pids: Vec<u32> = candidates.iter().map(|(_, pid)| *pid).collect();
+    let args_map = get_process_args(&pids).await;
+
+    candidates
+        .into_iter()
+        .map(|(name, pid)| {
+            let cmd = args_map.get(&pid).cloned().unwrap_or_default();
+            (name, pid, cmd)
+        })
+        .collect()
+}
+
+/// Breadth-first walk of the process subtree rooted at `shell_pid`, returning the
+/// `(agent_name, pid)` of every process whose `comm` basename (lowercased)
+/// matches a known agent. `shell_pid` itself is excluded.
+///
+/// BFS means shallower matches (closer to the shell) are yielded first, so the
+/// caller can treat the first match per agent as the canonical one. Pure over
+/// its `(pid, ppid, comm)` input so it can be unit-tested without spawning `ps`.
+fn agent_candidates_from_tree(
+    procs: &[(u32, u32, String)],
+    shell_pid: u32,
+    agent_names: &[&str],
+) -> Vec<(String, u32)> {
+    let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut comm_of: HashMap<u32, &str> = HashMap::new();
+    for (pid, ppid, comm) in procs {
+        children.entry(*ppid).or_default().push(*pid);
+        comm_of.insert(*pid, comm.as_str());
+    }
+
+    let mut out = Vec::new();
+    let mut seen: HashSet<u32> = HashSet::new();
+    let mut queue: VecDeque<u32> = VecDeque::new();
+    seen.insert(shell_pid);
+    queue.push_back(shell_pid);
+
+    while let Some(pid) = queue.pop_front() {
+        let Some(kids) = children.get(&pid) else { continue };
+        for &kid in kids {
+            // Guard against pid-reuse cycles so the walk always terminates.
+            if !seen.insert(kid) {
+                continue;
+            }
+            if let Some(&comm) = comm_of.get(&kid) {
+                let base = comm.rsplit('/').next().unwrap_or(comm).to_lowercase();
+                if agent_names.contains(&base.as_str()) {
+                    out.push((base, kid));
+                }
+            }
+            queue.push_back(kid);
+        }
+    }
+    out
 }
 
 #[derive(serde::Serialize)]
@@ -457,4 +570,87 @@ async fn find_listening_ports_per_pid(
     }
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::agent_candidates_from_tree;
+
+    const SHELL: u32 = 100;
+    const AGENTS: &[&str] = &["claude", "codex"];
+
+    fn proc(pid: u32, ppid: u32, comm: &str) -> (u32, u32, String) {
+        (pid, ppid, comm.to_string())
+    }
+
+    #[test]
+    fn detects_direct_child_agent() {
+        // shell → claude (the normal, no-wrapper case).
+        let procs = vec![proc(200, SHELL, "/Users/x/.local/bin/claude")];
+        assert_eq!(
+            agent_candidates_from_tree(&procs, SHELL, AGENTS),
+            vec![("claude".to_string(), 200)]
+        );
+    }
+
+    #[test]
+    fn detects_agent_wrapped_by_headroom() {
+        // shell → python(headroom wrap claude) → claude → python(headroom mcp serve).
+        // The agent is a grandchild; a direct-children scan would miss it.
+        let procs = vec![
+            proc(200, SHELL, "/opt/homebrew/bin/python3"),
+            proc(300, 200, "/Users/x/.local/bin/claude"),
+            proc(400, 300, "/opt/homebrew/bin/python3"),
+        ];
+        assert_eq!(
+            agent_candidates_from_tree(&procs, SHELL, AGENTS),
+            vec![("claude".to_string(), 300)]
+        );
+    }
+
+    #[test]
+    fn ignores_wrapper_and_unrelated_processes() {
+        // A python wrapper with no agent underneath, plus an unrelated claude in a
+        // different subtree, must not be attributed to this shell.
+        let procs = vec![
+            proc(200, SHELL, "/opt/homebrew/bin/python3"),
+            proc(999, 1, "/Users/x/.local/bin/claude"), // rooted at init, not the shell
+        ];
+        assert!(agent_candidates_from_tree(&procs, SHELL, AGENTS).is_empty());
+    }
+
+    #[test]
+    fn matches_codex_by_basename() {
+        let procs = vec![proc(250, SHELL, "/usr/local/bin/codex")];
+        assert_eq!(
+            agent_candidates_from_tree(&procs, SHELL, AGENTS),
+            vec![("codex".to_string(), 250)]
+        );
+    }
+
+    #[test]
+    fn keeps_shallowest_match_first() {
+        // claude at depth 1 and a nested claude at depth 2 — BFS yields the
+        // shallower one first so the caller treats it as canonical.
+        let procs = vec![
+            proc(300, SHELL, "/Users/x/.local/bin/claude"),
+            proc(500, 300, "/Users/x/.local/bin/claude"),
+        ];
+        let got = agent_candidates_from_tree(&procs, SHELL, AGENTS);
+        assert_eq!(got.first(), Some(&("claude".to_string(), 300)));
+    }
+
+    #[test]
+    fn terminates_on_pid_cycle() {
+        // Pathological ppid cycle must not hang the walk.
+        let procs = vec![
+            proc(200, SHELL, "/opt/homebrew/bin/python3"),
+            proc(SHELL, 200, "/bin/zsh"),
+            proc(300, 200, "/Users/x/.local/bin/claude"),
+        ];
+        assert_eq!(
+            agent_candidates_from_tree(&procs, SHELL, AGENTS),
+            vec![("claude".to_string(), 300)]
+        );
+    }
 }
