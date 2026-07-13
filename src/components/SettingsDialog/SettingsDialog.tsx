@@ -1,5 +1,6 @@
 import { useStore } from '@nanostores/react'
 import { FontSettingsTab } from '@/components/SettingsDialog/FontSettingsTab'
+import { ThemeSettingsTab } from '@/components/SettingsDialog/ThemeSettingsTab'
 import {
   Dialog,
   DialogContent,
@@ -12,7 +13,7 @@ import { $settingsOpen, closeSettings } from '@/modules/stores/$settingsOpen'
 /**
  * App-wide Settings dialog. Opened via the "Settings…" app-menu item
  * (⌘,) — see `useSettingsWiring`. Tabbed so more setting categories can
- * be added later without restructuring; today there's only "Font".
+ * be added later without restructuring; today there's "Theme" and "Font".
  */
 export function SettingsDialog() {
   const open = useStore($settingsOpen)
@@ -28,10 +29,14 @@ export function SettingsDialog() {
         <DialogHeader>
           <DialogTitle>Settings</DialogTitle>
         </DialogHeader>
-        <Tabs defaultValue="font">
+        <Tabs defaultValue="theme">
           <TabsList>
+            <TabsTrigger value="theme">Theme</TabsTrigger>
             <TabsTrigger value="font">Font</TabsTrigger>
           </TabsList>
+          <TabsContent value="theme">
+            <ThemeSettingsTab />
+          </TabsContent>
           <TabsContent value="font">
             <FontSettingsTab />
           </TabsContent>

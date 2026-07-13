@@ -6,26 +6,54 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Agent Terminal</title>
     <script>
+      // Pre-paint theme bootstrap: resolve the selected color theme and set
+      // the window/sidebar background before React loads so there's no flash.
+      // The map below mirrors the anchor colors in `colorThemes.ts`; the full
+      // token set is applied by `initColorThemeFromStorage` once JS runs.
       (() => {
-        var KEY, raw, legacy, theme
+        // id -> [type, background, sidebar]
+        var T = {
+          'agent-dark': ['dark', '#0e0f10', '#141517'],
+          'dark-modern': ['dark', '#1f1f1f', '#181818'],
+          'dark-plus': ['dark', '#1e1e1e', '#252526'],
+          abyss: ['dark', '#000c18', '#051336'],
+          'kimbie-dark': ['dark', '#221a0f', '#2b2013'],
+          monokai: ['dark', '#272822', '#1e1f1c'],
+          red: ['dark', '#390000', '#330000'],
+          'solarized-dark': ['dark', '#002b36', '#00212b'],
+          'tomorrow-night-blue': ['dark', '#002451', '#001c40'],
+          'agent-light': ['light', '#ffffff', '#fafafa'],
+          'light-modern': ['light', '#ffffff', '#f8f8f8'],
+          'light-plus': ['light', '#ffffff', '#f3f3f3'],
+          'quiet-light': ['light', '#f5f5f5', '#f5f4f2'],
+          'solarized-light': ['light', '#fdf6e3', '#eee8d5'],
+        }
+        var KEY = 'agent-terminal:color-theme'
+        var LEGACY = 'agent-terminal:theme'
         try {
-          KEY = 'agent-terminal:theme'
-          raw = localStorage.getItem(KEY)
-          if (raw === null) {
-            legacy = localStorage.getItem('theme')
-            if (legacy === 'light' || legacy === 'dark') {
-              raw = legacy
-              localStorage.setItem(KEY, legacy)
-              localStorage.removeItem('theme')
-            }
+          var id = localStorage.getItem(KEY)
+          if (id === null) {
+            // Migrate the old light/dark/system setting.
+            var legacy = localStorage.getItem(LEGACY)
+            if (legacy === 'dark') id = 'agent-dark'
+            else if (legacy === 'light') id = 'agent-light'
           }
-          theme =
-            raw === 'light' || raw === 'dark'
-              ? raw
-              : window.matchMedia('(prefers-color-scheme: dark)').matches
-                ? 'dark'
-                : 'light'
-          document.documentElement.setAttribute('data-theme', theme)
+          if (!id || !T[id]) {
+            // 'auto' (or unknown) -> follow the OS between the two defaults.
+            id = window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'agent-dark'
+              : 'agent-light'
+          }
+          var def = T[id]
+          var html = document.documentElement
+          html.setAttribute('data-theme', def[0])
+          html.setAttribute('data-color-theme', id)
+          html.style.setProperty('--background', def[1])
+          html.style.setProperty('--terminal-background', def[1])
+          html.style.setProperty('--card', def[1])
+          html.style.setProperty('--sidebar-background', def[2])
+          html.style.setProperty('--tab-bar-background', def[2])
+          html.style.setProperty('--status-bar-background', def[2])
         } catch (_e) {}
       })()
     </script>
