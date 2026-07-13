@@ -5,10 +5,10 @@ import { startCwdPersist } from '@/modules/mods/cwd-persist'
 import { startModListener } from '@/modules/mods/mod-listener'
 import { startNotificationsBridge } from '@/modules/notifications/notificationsBridge'
 import { syncNotificationsEnabledToBackend } from '@/modules/notifications/preferences'
+import { initColorThemeFromStorage } from '@/modules/stores/$colorTheme'
 import { initNavigation } from '@/modules/stores/$navigation'
 import { $projects } from '@/modules/stores/$projects'
 import { initTabRecencySubscriber } from '@/modules/stores/$tabRecency.init'
-import { initThemeFromStorage } from '@/modules/stores/$theme'
 import { installMobileOpsListener } from '@/modules/wss-bridge/mobile-ops'
 import { WorkspaceLayout } from '@/screens/workspace/WorkspaceLayout'
 import type { Project } from '@/screens/workspace/workspace.types'
@@ -39,7 +39,7 @@ async function bootstrap() {
   await installMobileOpsListener()
 
   initNavigation()
-  initThemeFromStorage()
+  initColorThemeFromStorage()
 
   // Recency tracker subscribes to navigation; must run after initNavigation
   // so the first bump captures the project/tab restored from disk.

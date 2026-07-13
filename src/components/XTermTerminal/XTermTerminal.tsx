@@ -78,24 +78,19 @@ type Props = {
 }
 
 import { handleKeyEvent } from '@/components/XTermTerminal/xterm-terminal.keys'
-import {
-  DARK_THEME,
-  LIGHT_THEME,
-} from '@/components/XTermTerminal/xterm-terminal.themes'
+import { xtermThemeForId } from '@/modules/theme/themeVars'
 
-// The IIFE in `index.html` always sets `data-theme` to the resolved
-// preference, so we read it as the source of truth and fall back to the
-// OS media query only as a defensive belt-and-braces (e.g. if the IIFE
-// silently failed).
-function getTerminalTheme(docTheme: string | null, prefersDark: boolean) {
-  const useDark =
-    docTheme === 'dark' ? true : docTheme === 'light' ? false : prefersDark
-  return useDark ? DARK_THEME : LIGHT_THEME
+// The IIFE in `index.html` and the color-theme store both set
+// `data-color-theme` on <html> to the resolved theme id, so we read it as
+// the source of truth and fall back to the OS media query only as a
+// defensive belt-and-braces (e.g. if the IIFE silently failed).
+function getTerminalTheme(colorThemeId: string | null, prefersDark: boolean) {
+  return xtermThemeForId(colorThemeId, prefersDark)
 }
 
 function applyTerminalTheme(term: Terminal, darkMq: MediaQueryList) {
-  const docTheme = document.documentElement.getAttribute('data-theme')
-  term.options.theme = getTerminalTheme(docTheme, darkMq.matches)
+  const id = document.documentElement.getAttribute('data-color-theme')
+  term.options.theme = getTerminalTheme(id, darkMq.matches)
   if (term.rows > 0) term.refresh(0, term.rows - 1)
 }
 
@@ -145,7 +140,7 @@ export const XTermTerminal = React.memo(function XTermTerminal({
     const term = new Terminal({
       allowProposedApi: true, // required by @xterm/addon-webgl
       theme: getTerminalTheme(
-        document.documentElement.getAttribute('data-theme'),
+        document.documentElement.getAttribute('data-color-theme'),
         darkMq.matches,
       ),
       fontFamily: fontFamilyStack($fontFamily.get()),
@@ -201,11 +196,11 @@ export const XTermTerminal = React.memo(function XTermTerminal({
     if (isActiveRef.current) webglLifecycle.enableWebgl()
 
     // Single source of theme updates: the MutationObserver watches
-    // `data-theme` on <html>. Both flows route through it —
-    //   1. User flips the toggle → $theme.setTheme → applyThemeToDocument
-    //      → setAttribute → MutationObserver fires here.
-    //   2. OS preference changes while in 'system' → $theme's matchMedia
-    //      subscription → applyThemeToDocument → same chain.
+    // `data-color-theme` on <html>. Both flows route through it —
+    //   1. User picks a theme → $colorTheme.setColorTheme →
+    //      applyColorThemeToDocument → setAttribute → MutationObserver fires.
+    //   2. OS preference changes while on 'auto' → the store's matchMedia
+    //      subscription → applyColorThemeToDocument → same chain.
     // The previous per-pane matchMedia listener was redundant with the
     // OS-change path above and caused a double refresh per change.
     const mo = new MutationObserver(() => {
@@ -213,7 +208,7 @@ export const XTermTerminal = React.memo(function XTermTerminal({
     })
     mo.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ['data-theme'],
+      attributeFilter: ['data-color-theme'],
     })
 
     // Drive fit() via ResizeObserver — fires after layout, no debounce needed.
