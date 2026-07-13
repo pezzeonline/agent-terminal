@@ -1,7 +1,6 @@
 import { useStore } from '@nanostores/react'
 import type React from 'react'
 import { RunningDot } from '@/components/RunningDot'
-import { ThemeToggle } from '@/components/ThemeToggle/ThemeToggle'
 import { $projects } from '@/modules/stores/$projects'
 import { $tabMeta, type TabMeta } from '@/modules/stores/$tabMeta'
 import { MONO_FONT, makeTabKey } from '@/screens/workspace/workspace.helpers'
@@ -10,17 +9,16 @@ import type { Project } from '@/screens/workspace/workspace.types'
 /* ---------------------------------------------------------------------------
  * StatusBarLeft — workspace overview
  *
- * Always renders the <ThemeToggle> so users can reach it even on idle
- * workspaces. Aggregate metric items only appear when non-zero.
+ * Aggregate metric items only appear when non-zero. Theme selection lives
+ * in the Settings dialog (⌘,) rather than here.
  *
  * Layout:
  *
- *   🌓  ● N active agents  ·  ● X active tasks  ·  Y failed tasks
- *   │   │                      │                    │
- *   │   │                      │                    └── tabs in error state
- *   │   │                      └───────────────────── shell tabs running
- *   │   └──────────────────────────────────────────── claude + codex running
- *   └── ThemeToggle (always visible)
+ *   ● N active agents  ·  ● X active tasks  ·  Y failed tasks
+ *   │                     │                    │
+ *   │                     │                    └── tabs in error state
+ *   │                     └───────────────────── shell tabs running
+ *   └─────────────────────────────────────────── claude + codex running
  *
  * Items are separated by a dim mid-dot (·).
  * -------------------------------------------------------------------------*/
@@ -104,19 +102,13 @@ export function StatusBarLeft() {
 
   return (
     <div className="mr-auto flex min-h-6 min-w-0 items-center gap-1.5 overflow-hidden">
-      <ThemeToggle />
-      {items.length > 0 && (
-        <>
-          <Dot />
-          {items.map((item, i) => (
-            // biome-ignore lint/suspicious/noArrayIndexKey: static order, no reordering
-            <span key={i} className="flex items-center gap-1.5">
-              {i > 0 && <Dot />}
-              {item}
-            </span>
-          ))}
-        </>
-      )}
+      {items.map((item, i) => (
+        // biome-ignore lint/suspicious/noArrayIndexKey: static order, no reordering
+        <span key={i} className="flex items-center gap-1.5">
+          {i > 0 && <Dot />}
+          {item}
+        </span>
+      ))}
     </div>
   )
 }
